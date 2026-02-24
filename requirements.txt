@@ -1,0 +1,8 @@
+selenium>=4.0.0
+requests
+beautifulsoup4
+pandas
+keyboard
+oracledb
+python-dotenv
+webdriver-manager

@@ -1,0 +1,6 @@
+.env
+*.log
+*_pycache__/
+.DS_Store   
+.vscode/
+.idea/  
