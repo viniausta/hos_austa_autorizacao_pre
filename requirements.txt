@@ -1,8 +1,14 @@
+# Dependências do projeto RPA — hos_austa_autorizacaopre
+
+# Automação web
 selenium>=4.0.0
-requests
-beautifulsoup4
-pandas
-keyboard
-oracledb
-python-dotenv
-webdriver-manager
+webdriver-manager>=4.0.0
+
+# Banco de dados Oracle
+oracledb>=1.0.0
+
+# HTTP (notificações Cliq)
+requests>=2.31.0
+
+# Configuração de ambiente
+python-dotenv>=1.0.0

@@ -1,6 +1,33 @@
+# Variáveis de ambiente e segredos
 .env
+
+# Logs gerados em execução
 *.log
-*_pycache__/
-.DS_Store   
+logs/*.log
+
+# Cache do Python
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Ambiente virtual
+.venv/
+venv/
+env/
+
+# IDEs
 .vscode/
-.idea/  
+.idea/
+*.iml
+
+# Sistema operacional
+.DS_Store
+Thumbs.db
+
+# Evidências e capturas de tela geradas pelo robô
+Evidencia/
+
+# Instant Client Oracle (binários pesados, não versionar)
+instantclient*/

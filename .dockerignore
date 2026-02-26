@@ -1,0 +1,48 @@
+# =============================================================
+# .dockerignore — exclui arquivos desnecessários da imagem Docker
+# Reduz tamanho da imagem e evita vazar segredos no build
+# =============================================================
+
+# Segredos — NUNCA entrar na imagem
+.env
+
+# Ambiente virtual local (dependências são instaladas via requirements.txt)
+.venv/
+venv/
+env/
+
+# Cache Python
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Logs locais
+logs/*.log
+*.log
+
+# IDEs e sistema operacional
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Git
+.git/
+.gitignore
+
+# Docker (não incluir os próprios arquivos Docker na imagem)
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Evidências e capturas de tela geradas em execução local
+Evidencia/
+
+# Oracle Instant Client (binários pesados — montar via volume se necessário)
+instantclient*/
+
+# Documentação
+*.md
+README*
