@@ -34,6 +34,7 @@ class Settings:
     id_unidade: int
     id_projeto: int
     cd_estabelecimento: int
+    cod_prestador: int
     unidade: str
     projeto: str
     rpa_script_name: str
@@ -61,12 +62,14 @@ class Settings:
 
         return cls(
             caminho_padrao=Path(os.environ.get("CAMINHO_PADRAO", ".")),
-            dev_mode=os.environ.get("DEV", "False").lower() in ("1", "true", "yes"),
+            dev_mode=os.environ.get(
+                "DEV", "False").lower() in ("1", "true", "yes"),
             db_user=os.environ.get("BD_USUARIO", ""),
             db_password=os.environ.get("BD_SENHA", ""),
             db_host=host,
             db_port=port,
             db_service=service,
+            cod_prestador=int(os.environ.get("COD_PRESTADOR", "0")),
             id_unidade=int(os.environ.get("ID_UNIDADE", "0")),
             id_projeto=int(os.environ.get("ID_PROJETO", "0")),
             cd_estabelecimento=int(os.environ.get("CD_ESTABELECIMENTO", "4")),

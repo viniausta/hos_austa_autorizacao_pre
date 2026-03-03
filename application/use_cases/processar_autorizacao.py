@@ -42,7 +42,7 @@ WHERE
     AND dt_entrada > TRUNC(SYSDATE)
     AND cd_estabelecimento = :1
     --AND ds_estagio = 'CM-Necessidade de Autorização - WS'
-    and nr_atendimento = 308176
+    fetch first 1 rows only
 """
 
 
@@ -72,6 +72,8 @@ class ProcessarAutorizacaoUseCase:
     def executar(self) -> None:
         """Executa o loop principal de processamento de autorizações."""
         url = self._controle.obter_parametro("URL_UNIMED")
+        self.nr_crm = self._controle.obter_parametro("CRM_PRE")
+        self.cod_prestador = self._config.cod_prestador
         usuario = self._config.usuario_tasy
         senha = self._config.senha_tasy
 
@@ -143,7 +145,7 @@ class ProcessarAutorizacaoUseCase:
                 _SQL_AUTORIZACOES_PENDENTES,
                 (self._config.cd_estabelecimento,),
             )
-            return [Autorizacao.from_row(r) for r in rows]
+            return [Autorizacao.from_row(r, nr_crm=self.nr_crm, cod_prestador=self.cod_prestador) for r in rows]
         except Exception as e:
             logger.exception("Erro ao buscar autorizações: %s", e)
             self._controle.registrar_log(

@@ -27,7 +27,7 @@ class Autorizacao:
 
     # Campos do formulário SPSADT
     ds_convenio: Optional[str] = None
-    cd_prestador: Optional[str] = None
+    cod_prestador: Optional[str] = None
     nr_crm: Optional[str] = None
     ie_consulta_emergencia: Optional[str] = None   # 'S' / 'N'
     ds_carater_atendimento: Optional[str] = None
@@ -40,29 +40,29 @@ class Autorizacao:
     cd_ausencia_val_benef: Optional[str] = None
 
     @classmethod
-    def from_row(cls, row: Dict[str, Any]) -> "Autorizacao":
+    def from_row(cls, row: Dict[str, Any], nr_crm: Optional[str] = None, cod_prestador: Optional[str] = None) -> "Autorizacao":
         """Constrói uma Autorizacao a partir de um dicionário de resultado SQL."""
         return cls(
+            nr_crm=nr_crm,
+            cod_prestador=cod_prestador,
             nr_atendimento=row["nr_atendimento"],
             nr_sequencia=row["nr_sequencia"],
             cd_convenio=row["cd_convenio"],
             cd_estabelecimento=row["cd_estabelecimento"],
             cod_carterinha=row.get("cod_carterinha"),
             cd_categoria=row.get("cd_categoria"),
-            tipo_autorizacao=row.get("tipo_autorizacao"),
-            ds_tipo_acomodacao=row.get("ds_tipo_acomodacao"),
+            tipo_autorizacao="SPSADT-PRE",
+            ds_tipo_acomodacao=row.get("de_tipo_acomodacao"),
             dt_entrada=row.get("dt_entrada"),
             dt_autorizacao=row.get("dt_autorizacao"),
             dt_inicio_vigencia_eup=row.get("dt_inicio_vigencia_eup"),
             ds_convenio=row.get("ds_convenio"),
-            cd_prestador=row.get("cd_prestador"),
-            nr_crm=row.get("nr_crm"),
-            ie_consulta_emergencia=row.get("ie_consulta_emergencia"),
-            ds_carater_atendimento=row.get("ds_carater_atendimento"),
-            ie_tipo_consulta=row.get("ie_tipo_consulta"),
-            ie_tipo_atendimento=row.get("ie_tipo_atendimento"),
-            ie_regime_atendimento=row.get("ie_regime_atendimento"),
-            tp_acidente=row.get("tp_acidente"),
+            ie_consulta_emergencia="True",
+            ds_carater_atendimento="Urgência/Emergência",
+            ie_tipo_consulta="Primeira consulta",
+            ie_tipo_atendimento="Consulta",
+            ie_regime_atendimento="Pronto Socorro",
+            tp_acidente="Não acidente",
             ds_ind_clinica=row.get("ds_ind_clinica"),
             ds_observacao=row.get("ds_observacao"),
             cd_ausencia_val_benef=row.get("cd_ausencia_val_benef"),

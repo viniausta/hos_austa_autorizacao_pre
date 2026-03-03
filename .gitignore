@@ -2,8 +2,7 @@
 .env
 
 # Logs gerados em execução
-*.log
-logs/*.log
+logs/
 
 # Cache do Python
 __pycache__/

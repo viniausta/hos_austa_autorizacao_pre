@@ -612,6 +612,8 @@ else:
                 return texto
             except (TimeoutException, NoAlertPresentException):
                 return None
+            except Exception:
+                return None
 
         # ------------------------------------------------------------------
         # Utilitários internos

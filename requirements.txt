@@ -12,3 +12,6 @@ requests>=2.31.0
 
 # Configuração de ambiente
 python-dotenv>=1.0.0
+
+# Debug (necessário para F5 no VSCode)
+debugpy>=1.8.0

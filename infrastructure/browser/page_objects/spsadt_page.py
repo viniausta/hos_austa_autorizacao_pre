@@ -54,7 +54,7 @@ class SpsadtPage:
     # Seletores — rotina "Preencher Dados SPSADT"
     # ------------------------------------------------------------------
 
-    _SEL_CD_PRESTADOR = ("id", "cd_prestador")
+    _SEL_cod_prestador = ("id", "cd_prestador")
     _SEL_NR_CRM = ("id", "nr_crm")
     _SEL_CHECK_URGENCIA = ("id", "idCheckUrg")
     _SEL_CARATER_ATENDIMENTO = ("css", "#carater_atend_servico")
@@ -122,8 +122,10 @@ class SpsadtPage:
             self._browser.click_elemento(
                 *self._SEL_REQUISITAR_AUTORIZACAO, timeout=10)
 
-        # 3. Aguarda tela carregar e seleciona tipo SPSADT (value="2")
-        carregou = self._aguardar_tela_carregar(self._SEL_SELECIONAR_TELA)
+        # 3. Aguarda tela carregar
+        with self._browser.frame_do_elemento(*self._SEL_SELECIONAR_TELA, timeout=10):
+            carregou = self._browser.aguardar_elemento_visivel(
+                *self._SEL_SELECIONAR_TELA, timeout=10)
         if not carregou:
             raise SpsadtFalhouError(
                 "Tela de SPSADT não carregou após clicar em 'Requisitar autorização'."
@@ -251,7 +253,10 @@ class SpsadtPage:
             self._browser.click_elemento(*self._SEL_BTN_SALVAR, timeout=5)
             texto_alerta = self._browser.tratar_alerta(
                 aceitar=False, timeout=3)
-            self._browser.fechar_aba()
+
+            self._browser.localizar_ou_anexar_aba(
+                titulo_contem="Portal da operadora", timeout=10
+            )
 
             if texto_alerta:
                 logger.warning(
@@ -261,6 +266,7 @@ class SpsadtPage:
                 self._tratar_alerta_beneficiario(
                     texto_alerta, str(autorizacao.cod_carterinha or "").zfill(
                         17), autorizacao.nr_atendimento)
+                self._browser.fechar_aba()
                 return False
 
             return True  # salvo sem alerta = sucesso
@@ -302,7 +308,7 @@ class SpsadtPage:
         ds_convenio = autorizacao.ds_convenio or ""
 
         # Localiza o frame do formulário uma única vez pelo primeiro campo
-        if not self._browser.alternar_frame_com_elemento(*self._SEL_CD_PRESTADOR, timeout=15):
+        if not self._browser.alternar_frame_com_elemento(*self._SEL_cod_prestador, timeout=15):
             raise SpsadtFalhouError(
                 f"Frame do formulário SPSADT não encontrado | NrAtend={autorizacao.nr_atendimento}"
             )
@@ -310,8 +316,8 @@ class SpsadtPage:
         try:
             # 1. Prestador
             self._browser.definir_valor(
-                *self._SEL_CD_PRESTADOR, str(autorizacao.cd_prestador or ""))
-            self._browser.enviar_tecla(*self._SEL_CD_PRESTADOR, "TAB")
+                *self._SEL_cod_prestador, str(autorizacao.cod_prestador or ""))
+            self._browser.enviar_tecla(*self._SEL_cod_prestador, "TAB")
 
             # 2. CRM
             self._browser.definir_valor(
@@ -319,7 +325,7 @@ class SpsadtPage:
             self._browser.enviar_tecla(*self._SEL_NR_CRM, "TAB")
 
             # 3. Checkbox urgência (opcional)
-            if str(autorizacao.ie_consulta_emergencia or "").upper() == "S":
+            if autorizacao.ie_consulta_emergencia:
                 self._browser.click_elemento(*self._SEL_CHECK_URGENCIA)
                 logger.info("Consulta de urgência marcada | NrAtend=%s",
                             autorizacao.nr_atendimento)
@@ -343,7 +349,7 @@ class SpsadtPage:
 
             # 8. Prestador de entrada + TAB
             self._browser.definir_valor(
-                *self._SEL_NR_PRESTADOR_ENTRADA, str(autorizacao.cd_prestador or ""))
+                *self._SEL_NR_PRESTADOR_ENTRADA, str(autorizacao.cod_prestador or ""))
             self._browser.enviar_tecla(*self._SEL_NR_PRESTADOR_ENTRADA, "TAB")
 
             # 9. Indicação de acidente
