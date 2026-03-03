@@ -1,0 +1,76 @@
+# =============================================================================
+# docker-compose.yml — hos_austa_autorizacaopre
+#
+# Serviços:
+#   selenium  → Standalone Chrome com VNC embutido para debug visual
+#   rpa       → Robô Python conectado ao Selenium via Remote WebDriver
+#
+# Uso:
+#   docker compose up --build          → sobe tudo e reconstrói a imagem
+#   docker compose up -d               → modo background
+#   docker compose logs -f rpa         → acompanha logs do robô
+#   docker compose down                → para e remove containers
+#
+# Debug visual (ver o navegador ao vivo):
+#   Acesse http://localhost:7900 no browser (sem senha)
+# =============================================================================
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # Selenium Standalone Chrome
+  #   - Expõe WebDriver na porta 4444 (consumido internamente pelo rpa)
+  #   - Expõe VNC na porta 7900 (acesso externo para debug visual)
+  #   - shm_size: evita crash do Chrome por falta de shared memory
+  # ---------------------------------------------------------------------------
+  selenium:
+    image: selenium/standalone-chrome:latest
+    container_name: austa_selenium
+    shm_size: "2gb"
+    ports:
+      - "4444:4444"   # WebDriver API (acesso interno do rpa via http://selenium:4444)
+      - "7900:7900"   # noVNC — visualizar o navegador em http://localhost:7900
+    environment:
+      - SE_NODE_MAX_SESSIONS=1
+      - SE_VNC_NO_PASSWORD=1          # Remove senha do VNC para facilitar debug
+      - SE_SCREEN_WIDTH=1920
+      - SE_SCREEN_HEIGHT=1080
+      - SE_START_XVFB=true
+    healthcheck:
+      test: ["CMD", "curl", "-fsSL", "http://localhost:4444/wd/hub/status"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Robô RPA (Python)
+  #   - Conecta ao Selenium via SELENIUM_REMOTE_URL
+  #   - Carrega configurações do .env
+  #   - Aguarda o Selenium estar healthy antes de iniciar
+  #   - restart: on-failure permite recuperação automática de falhas transitórias
+  # ---------------------------------------------------------------------------
+  rpa:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: austa_rpa
+    env_file:
+      - .env                          # Carrega todas as variáveis do arquivo .env
+    environment:
+      - SELENIUM_REMOTE_URL=http://selenium:4444/wd/hub   # Sobrescreve se definida no .env
+    depends_on:
+      selenium:
+        condition: service_healthy    # Aguarda Selenium estar pronto antes de iniciar
+    restart: on-failure               # Reinicia automaticamente em caso de erro não esperado
+    volumes:
+      - ./logs:/app/logs              # Persiste logs fora do container
+      - evidencias:/app/Evidencia     # Volume nomeado para capturas de tela
+
+# ---------------------------------------------------------------------------
+# Volumes nomeados
+# ---------------------------------------------------------------------------
+volumes:
+  evidencias:
+    driver: local

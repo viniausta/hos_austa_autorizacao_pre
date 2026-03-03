@@ -1,36 +1,123 @@
+"""Entry point — Automação de Autorizações de PA (Pronto Atendimento) — Hospital Austa. [ Convênio UNIMED ].
 
-from logs.logger_config import logger
-from processamento import Config, Processamento
-from comandos import DBClient
+Responsabilidade única: compor e conectar as dependências, depois disparar o caso de uso.
+Toda lógica de negócio está na camada application/.
+"""
+from __future__ import annotations
+
+import os
+import sys
 from typing import Optional
-from processamento import DatabaseProtocol
+
+from monitoring.logger_config import logger
+from config.settings import Settings
+from core.exceptions import RPAException
+from infrastructure.database.oracle_client import OracleClient
+from infrastructure.browser.web_controller import WebController
+from infrastructure.browser.page_objects.spsadt_page import SpsadtPage
+from infrastructure.browser.page_objects.login_page import LoginPage
+from infrastructure.notifications.cliq_notificador import CliqNotificador
+from application.services.controle_execucao_service import ControleExecucaoService
+from application.use_cases.processar_autorizacao import ProcessarAutorizacaoUseCase
 
 
-def main() -> None:
-    logger.info("Iniciando automação de autorização PA...")
-    # 1. Carrega configurações de ambiente
-    config = Config.from_env()
-    # 2. Tenta conectar ao banco de dados
-    db_client: Optional[DatabaseProtocol] = None
+def main() -> int:
+    """Ponto de entrada principal.
+
+    Returns:
+        0 em sucesso, 1 em falha — compatível com sys.exit() e supervisores de processo.
+    """
+    config = Settings.from_env()
+    logger.info(
+        "Iniciando automação '%s' | Unidade: %s | Dev: %s",
+        config.rpa_script_name,
+        config.unidade,
+        config.dev_mode,
+    )
+
+    # Prepara diretórios necessários
+    config.caminho_padrao.mkdir(parents=True, exist_ok=True)
+    (config.caminho_padrao / "Evidencia").mkdir(parents=True, exist_ok=True)
+
+    db: Optional[OracleClient] = None
+    browser: Optional[WebController] = None
+
     try:
-        db_client = DBClient(config)
-        logger.info("Conexão com o banco estabelecida.")
-    except Exception as e:
-        logger.warning(f"Falha ao conectar ao banco de dados: {e}")
-    # 3. Inicializa a automação
-    rpa = Processamento(config, db=db_client, browser=None)
-    # 4. Executa os fluxos da automação
-    try:
-        rpa.inicializar()
-        # rpa.bd_importar_contas()
-        rpa.executar()
-        logger.info("✅ Automação concluída com sucesso.")
+        # -----------------------------------------------------------------
+        # Infraestrutura
+        # -----------------------------------------------------------------
+        db = OracleClient(config)
+
+        # Modo remoto (Docker) ativado quando SELENIUM_REMOTE_URL está configurada
+        selenium_remote_url = os.environ.get("SELENIUM_REMOTE_URL")
+        if selenium_remote_url:
+            logger.info("Modo Docker: conectando ao Selenium em %s",
+                        selenium_remote_url)
+        browser = WebController(remote_url=selenium_remote_url)
+
+        # -----------------------------------------------------------------
+        # Notificador (opcional — só ativo se CLIQ_WEBHOOK_URL configurada)
+        # -----------------------------------------------------------------
+        webhook_url = os.environ.get("CLIQ_WEBHOOK_URL")
+        notificador = CliqNotificador(webhook_url) if webhook_url else None
+        if notificador:
+            logger.info("Notificador Cliq ativo.")
+
+        # -----------------------------------------------------------------
+        # Serviço de controle de execução
+        # -----------------------------------------------------------------
+        controle = ControleExecucaoService(
+            db=db,
+            id_unidade=config.id_unidade,
+            id_projeto=config.id_projeto,
+            dev_mode=config.dev_mode,
+        )
+        controle.criar_execucao(
+            unidade=config.unidade,
+            projeto=config.projeto,
+            script=config.rpa_script_name,
+            usuario=config.username,
+        )
+
+        caso_de_uso = ProcessarAutorizacaoUseCase(
+            config=config,
+            db=db,
+            login=LoginPage(browser),
+            autorizacao=SpsadtPage(browser, dev_mode=config.dev_mode),
+            controle=controle,
+            notificador=notificador,
+        )
+        caso_de_uso.executar()
+
+        controle.registrar_log("INFO", "Automação concluída com sucesso.")
+        controle.finalizar_execucao(status="Concluido")
+        logger.info("Automação finalizada com sucesso.")
+        return 0
+
+    except RPAException as e:
+        logger.error("Erro de domínio na automação: %s", e)
+        if db:
+            try:
+                ControleExecucaoService(db, 0, 0, False).registrar_log(
+                    "ERROR", f"Encerramento por erro: {e}"
+                )
+            except Exception:
+                pass
+        return 1
+
     except Exception:
-        logger.exception("❌ Erro na execução da automação")
+        logger.exception("Erro inesperado — automação encerrada com falha.")
+        return 1
+
     finally:
-        rpa.finalizar()
-        logger.info("Automação finalizada.")
+        if db:
+            db.close()
+        if browser:
+            try:
+                browser.fechar_navegador()
+            except Exception:
+                logger.warning("Erro ao fechar o navegador no encerramento.")
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
