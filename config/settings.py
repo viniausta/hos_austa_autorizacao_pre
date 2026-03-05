@@ -48,6 +48,15 @@ class Settings:
     caminho_chrome_driver: str
     caminho_rede_anexo: str
     senha_rede_anexo: str
+    caminho_backup_guia: str   # destino de cópia do PDF da Guia TISS
+    caminho_tasy_storage: str  # diretório lido pelo Tasy para anexo da guia
+
+    # Notificações Zoho Cliq (OAuth2)
+    zoho_client_id: str
+    zoho_client_secret: str
+    zoho_refresh_token: str
+    cliq_canal_normal: str     # Chat ID para alertas/sucesso/mensagens gerais
+    cliq_canal_erro: str       # Chat ID dedicado a erros
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -82,4 +91,11 @@ class Settings:
             caminho_chrome_driver=os.environ.get("CAMINHO_CHROME_DRIVER", ""),
             caminho_rede_anexo=os.environ.get("CAMINHO_REDE_ANEXO", ""),
             senha_rede_anexo=os.environ.get("SENHA_REDE_ANEXO", ""),
+            caminho_backup_guia=os.environ.get("CAMINHO_BACKUP_GUIA", ""),
+            caminho_tasy_storage=os.environ.get("CAMINHO_TASY_STORAGE", ""),
+            zoho_client_id=os.environ.get("ZOHO_CLIENT_ID", ""),
+            zoho_client_secret=os.environ.get("ZOHO_CLIENT_SECRET", ""),
+            zoho_refresh_token=os.environ.get("ZOHO_REFRESH_TOKEN", ""),
+            cliq_canal_normal=os.environ.get("CLIQ_CANAL_NORMAL", ""),
+            cliq_canal_erro=os.environ.get("CLIQ_CANAL_ERRO", ""),
         )

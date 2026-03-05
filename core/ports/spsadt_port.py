@@ -21,3 +21,7 @@ class SpsadtPort(Protocol):
             SpsadtFalhouError: Se não for possível concluir o SPSADT.
         """
         ...
+
+    def manter_sessao(self) -> None:
+        """Executa ação de keep-alive para manter a sessão do portal ativa."""
+        ...
