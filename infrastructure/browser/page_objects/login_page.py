@@ -6,6 +6,7 @@ detalhes de UI do restante da aplicação (Padrão POM).
 from __future__ import annotations
 
 import logging
+import time
 
 from core.exceptions import LoginFalhouError
 from core.ports.browser_port import BrowserPort
@@ -52,9 +53,11 @@ class LoginPage:
         logger.info("Navegando para a página de login: %s", url)
         self._browser.navegar(url)
 
-        logger.debug("Localizando campo de usuário e preenchendo credenciais...")
+        logger.debug(
+            "Localizando campo de usuário e preenchendo credenciais...")
         with self._browser.frame_do_elemento(*self._SEL_USUARIO, timeout=10):
-            self._browser.selecionar_opcao(*self._SEL_PRESTADOR, "Prestador", timeout=5)
+            self._browser.selecionar_opcao(
+                *self._SEL_PRESTADOR, "Prestador", timeout=5)
             self._browser.definir_valor(*self._SEL_USUARIO, usuario, timeout=5)
             self._browser.definir_valor(*self._SEL_SENHA, senha, timeout=5)
             self._browser.click_elemento(*self._SEL_BTN_ENTRAR, timeout=10)
@@ -69,6 +72,6 @@ class LoginPage:
 
         logger.info("Login realizado com sucesso.")
 
-        # Fecha abas extras abertas pelo sistema, mantendo apenas o portal principal
+        time.sleep(10)
         self._browser.fechar_abas_exceto("Portal da operadora", timeout=10)
         logger.info("Abas extras fechadas após login.")

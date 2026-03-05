@@ -89,18 +89,23 @@ else:
             driver_path: Optional[str] = None,
             browser: str = "chrome",
             remote_url: Optional[str] = None,
+            caminho_download: Optional[str] = None,
         ) -> None:
             if remote_url:
-                self.driver: Any = self._iniciar_browser_remoto(remote_url)
+                self.driver: Any = self._iniciar_browser_remoto(
+                    remote_url, caminho_download)
             else:
-                self.driver = self._iniciar_browser(driver_path, browser)
+                self.driver = self._iniciar_browser(
+                    driver_path, browser, caminho_download)
             self.actions = ActionChains(self.driver)
 
         # ------------------------------------------------------------------
         # Inicialização — modo remoto (Docker / Selenium Standalone)
         # ------------------------------------------------------------------
 
-        def _iniciar_browser_remoto(self, remote_url: str) -> Any:
+        def _iniciar_browser_remoto(
+            self, remote_url: str, caminho_download: Optional[str] = None
+        ) -> Any:
             """Conecta ao Selenium Standalone ou Grid via Remote WebDriver.
 
             Flags obrigatórias para ambiente containerizado:
@@ -118,6 +123,13 @@ else:
             options.add_argument("--disable-notifications")
             options.add_experimental_option(
                 "excludeSwitches", ["enable-logging"])
+            if caminho_download:
+                options.add_experimental_option("prefs", {
+                    "download.default_directory": caminho_download,
+                    "download.prompt_for_download": False,
+                    "download.directory_upgrade": True,
+                    "plugins.always_open_pdf_externally": True,
+                })
 
             try:
                 driver = webdriver.Remote(
@@ -135,7 +147,12 @@ else:
         # Inicialização do driver
         # ------------------------------------------------------------------
 
-        def _iniciar_browser(self, driver_path: Optional[str], browser: str) -> Any:
+        def _iniciar_browser(
+            self,
+            driver_path: Optional[str],
+            browser: str,
+            caminho_download: Optional[str] = None,
+        ) -> Any:
             """Cria e retorna a instância do WebDriver conforme o navegador."""
             project_root = Path(__file__).resolve().parent.parent.parent
 
@@ -154,6 +171,13 @@ else:
             options.add_argument("disable-popup-blocking")
             options.add_argument("disable-notifications")
             options.add_argument("disable-gpu")
+            if caminho_download:
+                options.add_experimental_option("prefs", {
+                    "download.default_directory": caminho_download,
+                    "download.prompt_for_download": False,
+                    "download.directory_upgrade": True,
+                    "plugins.always_open_pdf_externally": True,
+                })
 
             try:
                 if browser == "chrome":

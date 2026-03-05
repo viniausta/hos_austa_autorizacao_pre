@@ -10,7 +10,11 @@ Orquestra o fluxo completo:
 from __future__ import annotations
 
 import logging
+import random
+import shutil
+import string
 import time
+from pathlib import Path
 from typing import List, Optional
 
 from application.services.controle_execucao_service import ControleExecucaoService
@@ -41,8 +45,9 @@ WHERE
     AND cd_convenio IN (27)
     AND dt_entrada > TRUNC(SYSDATE)
     AND cd_estabelecimento = :1
-    --AND ds_estagio = 'CM-Necessidade de Autorização - WS'
-    fetch first 1 rows only
+    AND ds_estagio = 'CM-Necessidade de Autorização - WS'
+    --and nr_atendimento = 314868 
+    --fetch first 1 rows only
 """
 
 
@@ -89,14 +94,25 @@ class ProcessarAutorizacaoUseCase:
 
         self._realizar_login(url, usuario, senha)
 
+        # Keep-alive: a cada _KEEP_ALIVE_IDLES ciclos ociosos (~5 min a 5s/ciclo)
+        # clica em "Requisição para autorização" para manter a sessão do portal.
+        _KEEP_ALIVE_IDLES = 60
+        idle_count = 0
+
         while self._deve_continuar():
             autorizacoes = self._buscar_autorizacoes_pendentes()
 
             if not autorizacoes:
+                idle_count += 1
+                if idle_count >= _KEEP_ALIVE_IDLES:
+                    logger.info("Keep-alive: mantendo sessão do portal ativa.")
+                    self._autorizacao.manter_sessao()
+                    idle_count = 0
                 logger.info("Nenhuma autorização pendente. Aguardando 5s...")
                 time.sleep(5)
                 continue
 
+            idle_count = 0
             logger.info(
                 "%d autorização(ões) encontrada(s) para processar.", len(autorizacoes))
             self._controle.registrar_log(
@@ -165,7 +181,17 @@ class ProcessarAutorizacaoUseCase:
             autorizacao.nr_sequencia,
         )
         try:
-            self._autorizacao.processar(autorizacao)
+            resultado = self._autorizacao.processar(autorizacao)
+            if resultado:
+                self._atualizar_resultado_banco(autorizacao, resultado)
+
+                if self._notificador:
+                    self._notificador.notificar_sucesso(
+                        f"[{self._config.rpa_script_name}] "
+                        f"#NrAtend: {autorizacao.nr_atendimento} > "
+                        f"{resultado.get('status_portal', '')} - "
+                        f"{resultado.get('mensagem', '')}"
+                    )
 
             self._controle.registrar_log(
                 "INFO",
@@ -187,12 +213,6 @@ class ProcessarAutorizacaoUseCase:
                 str(autorizacao.nr_atendimento),
             )
             self._atualizar_falha_banco(autorizacao, str(e))
-            if self._notificador:
-                self._notificador.notificar_erro(
-                    f"Falha na autorização {autorizacao.nr_atendimento}",
-                    detalhes={"erro": str(
-                        e), "convenio": autorizacao.cd_convenio},
-                )
 
         except Exception as e:
             logger.exception(
@@ -205,10 +225,348 @@ class ProcessarAutorizacaoUseCase:
             )
             if self._notificador:
                 self._notificador.notificar_erro(
-                    f"Erro ao processar autorização {autorizacao.nr_atendimento}",
-                    detalhes={"erro": str(
-                        e), "convenio": autorizacao.cd_convenio},
+                    f"[{self._config.rpa_script_name}]\n"
+                    f"#Falha no script\n"
+                    f"NrAtendimento: {autorizacao.nr_atendimento} -\n\n"
+                    f"MensagemErro: {e}"
                 )
+
+    # ------------------------------------------------------------------
+    # Atualização de banco pós-SPSADT
+    # ------------------------------------------------------------------
+
+    def _atualizar_resultado_banco(
+        self, autorizacao: Autorizacao, resultado: dict
+    ) -> None:
+        """Despacha para o método correto com base no status retornado pelo portal."""
+        status = resultado.get("status_retorno_tasy", 0)
+        cod_req = resultado.get("cod_requisicao", "")
+        cod_guia = resultado.get("cod_guia", "")
+        mensagem = resultado.get("mensagem", "")
+        pdfs = resultado.get("pdfs_baixados", [])
+
+        if status == 2:  # CM-Autorizado - WS
+            self._registrar_aprovado(autorizacao, cod_req, cod_guia, pdfs)
+        elif status == 6:  # CM-Encaminhado Convênio - WS
+            self._registrar_em_analise(autorizacao, cod_req, 6)
+        elif status == 29:  # CM-Em análise - WS
+            self._registrar_em_analise(autorizacao, cod_req, 29, cod_guia)
+        elif status == 7:  # CM-Negado - WS
+            self._registrar_negado(autorizacao, cod_req)
+        else:  # Impedimento (167 ou qualquer outro)
+            self._registrar_impedimento(autorizacao, cod_req, mensagem)
+
+    def _registrar_aprovado(
+        self,
+        autorizacao: Autorizacao,
+        cod_requisicao: str,
+        cod_guia: str,
+        pdfs: list,
+    ) -> None:
+        """Executa todas as procedures TASY e atualiza RPA para status Aprovado (2)."""
+        nr_seq = autorizacao.nr_sequencia
+        nr_atend = autorizacao.nr_atendimento
+
+        self._controle.registrar_log("INFO", "Status = 2 - Aprovado",
+                                     str(nr_atend))
+
+        # 1. Atualiza campos de guia e senha
+        self._executar_sql(
+            "BEGIN tasy.RPA_ATUALIZA_AUTORIZACAO_CONV("
+            ":1,'automacaotasy',:2,:3,:4,SYSDATE+1); END;",
+            (nr_seq, cod_guia, cod_requisicao, cod_guia),
+            "RPA_ATUALIZA_AUTORIZACAO_CONV",
+        )
+
+        # 2. Atualiza guia principal na entrada única
+        self._executar_sql(
+            "BEGIN tasy.RPA_ATUALIZA_GUIA_PRINCIPAL(:1,:2); END;",
+            (nr_atend, cod_guia),
+            "RPA_ATUALIZA_GUIA_PRINCIPAL",
+        )
+
+        # 3. Obtém SEQ_TERCEIRO e atualiza evento/autor
+        seq_terceiro = ""
+        try:
+            seq_terceiro = str(
+                self._db.execute_scalar(
+                    "SELECT SEQ_TERCEIRO FROM tasy.BPM_RELAC_MEDICO "
+                    "WHERE NR_ATENDIMENTO = :1",
+                    (nr_atend,),
+                ) or ""
+            )
+        except Exception as e:
+            logger.warning("Erro ao obter SEQ_TERCEIRO | NrAtend=%s: %s",
+                           nr_atend, e)
+
+        self._executar_sql(
+            "BEGIN TASY.ATUALIZAR_EVENTO_AUTOR_CONV(:1,:2,:3,:4,:5); END;",
+            (5, seq_terceiro, "", "", "automacaotasy"),
+            "ATUALIZAR_EVENTO_AUTOR_CONV",
+        )
+
+        # 4. Atualiza estágio para 2 (Autorizado)
+        self._executar_sql(
+            "BEGIN TASY.ATUALIZAR_AUTORIZACAO_CONVENIO("
+            ":1,'automacaotasy',2,'N','N','S'); END;",
+            (nr_seq,),
+            "ATUALIZAR_AUTORIZACAO_CONVENIO(2)",
+        )
+
+        # 5. Atualiza autorização TISS
+        self._executar_sql(
+            "BEGIN TASY.TISS_ATUALIZAR_AUTORIZACAO(:1,'automacaotasy'); END;",
+            (nr_seq,),
+            "TISS_ATUALIZAR_AUTORIZACAO",
+        )
+
+        # 6. Atualiza quantidade de procedimentos
+        self._executar_sql(
+            "BEGIN TASY.ATUALIZAR_QT_PROC_AUT(:1); END;",
+            (nr_seq,),
+            "ATUALIZAR_QT_PROC_AUT",
+        )
+
+        # 7. Anexa PDF da guia ao Tasy (somente se houve download)
+        if pdfs:
+            self._anexar_guia_tasy(autorizacao, pdfs)
+
+        # 8. Atualiza base RPA
+        self._executar_sql(
+            """UPDATE ROBO_RPA.HOS_AUTORIZACOES
+               SET STATUS    = 'AUTORIZADO',
+                   MENSAGEM  = 'Autorização realizada com sucesso',
+                   DT_EXECUCAO  = SYSTIMESTAMP,
+                   CD_REQUISICAO = :1,
+                   CD_GUIA      = :2,
+                   CD_SENHA     = :3
+               WHERE NR_SEQUENCIA = :4""",
+            (cod_requisicao, cod_guia, cod_guia, nr_seq),
+            "UPDATE HOS_AUTORIZACOES AUTORIZADO",
+        )
+        self._controle.registrar_log("INFO", "Atualizou base RPA", str(nr_atend))
+
+        # 9. Atualiza categoria do plano (apenas Unimed + SPSADT-PRE)
+        ds_convenio = autorizacao.ds_convenio or ""
+        if "Unimed" in ds_convenio and autorizacao.tipo_autorizacao == "SPSADT-PRE":
+            self._atualizar_categoria_unimed(autorizacao, cod_guia)
+
+    def _registrar_em_analise(
+        self,
+        autorizacao: Autorizacao,
+        cod_requisicao: str,
+        status: int,
+        cod_guia: str = "",
+    ) -> None:
+        """Atualiza TASY e RPA para status Em Análise (6 ou 29)."""
+        nr_seq = autorizacao.nr_sequencia
+        nr_atend = autorizacao.nr_atendimento
+
+        # Atualiza estágio no TASY
+        self._executar_sql(
+            "BEGIN TASY.ATUALIZAR_AUTORIZACAO_CONVENIO("
+            ":1,'automacaotasy',:2,'N','N','S'); END;",
+            (nr_seq, status),
+            f"ATUALIZAR_AUTORIZACAO_CONVENIO({status})",
+        )
+
+        # Atualiza base RPA
+        self._executar_sql(
+            """UPDATE ROBO_RPA.HOS_AUTORIZACOES
+               SET STATUS    = 'EM ANÁLISE',
+                   MENSAGEM  = 'Em análise pela operadora',
+                   DT_EXECUCAO  = SYSTIMESTAMP,
+                   CD_REQUISICAO = :1
+               WHERE NR_SEQUENCIA = :2""",
+            (cod_requisicao, nr_seq),
+            f"UPDATE HOS_AUTORIZACOES EM ANÁLISE ({status})",
+        )
+
+        # Para status 29 com guia, atualiza campos de guia
+        if status == 29:
+            cod_guia_efetivo = cod_guia or "0"
+            self._executar_sql(
+                "BEGIN tasy.RPA_ATUALIZA_AUTORIZACAO_CONV("
+                ":1,'automacaotasy',:2,:3,:4,SYSDATE+30); END;",
+                (nr_seq, cod_guia_efetivo, cod_requisicao, cod_guia_efetivo),
+                "RPA_ATUALIZA_AUTORIZACAO_CONV(29)",
+            )
+
+        self._controle.registrar_log("INFO",
+                                     f"Em análise ({status}) — base RPA atualizada",
+                                     str(nr_atend))
+
+    def _registrar_negado(
+        self, autorizacao: Autorizacao, cod_requisicao: str
+    ) -> None:
+        """Atualiza TASY e RPA para status Negado (7)."""
+        nr_seq = autorizacao.nr_sequencia
+
+        self._executar_sql(
+            "BEGIN TASY.ATUALIZAR_AUTORIZACAO_CONVENIO("
+            ":1,'automacaotasy',7,'N','N','S'); END;",
+            (nr_seq,),
+            "ATUALIZAR_AUTORIZACAO_CONVENIO(7)",
+        )
+
+        self._executar_sql(
+            """UPDATE ROBO_RPA.HOS_AUTORIZACOES
+               SET STATUS    = 'NEGADO',
+                   MENSAGEM  = 'Negado pela operadora',
+                   DT_EXECUCAO  = SYSTIMESTAMP,
+                   CD_REQUISICAO = :1
+               WHERE NR_SEQUENCIA = :2""",
+            (cod_requisicao, nr_seq),
+            "UPDATE HOS_AUTORIZACOES NEGADO",
+        )
+        self._controle.registrar_log("INFO", "Negado — base RPA atualizada",
+                                     str(autorizacao.nr_atendimento))
+
+    def _registrar_impedimento(
+        self, autorizacao: Autorizacao, cod_requisicao: str, mensagem: str
+    ) -> None:
+        """Atualiza TASY (status 167) e base RPA para Impedimento."""
+        self._executar_sql(
+            "BEGIN TASY.ATUALIZAR_AUTORIZACAO_CONVENIO("
+            ":1,'automacaotasy',167,'N','N','S'); END;",
+            (autorizacao.nr_sequencia,),
+            "ATUALIZAR_AUTORIZACAO_CONVENIO(167)",
+        )
+
+        self._executar_sql(
+            """UPDATE ROBO_RPA.HOS_AUTORIZACOES
+               SET STATUS    = 'IMPEDIMENTO',
+                   MENSAGEM  = :1,
+                   DT_EXECUCAO  = SYSTIMESTAMP,
+                   CD_REQUISICAO = :2
+               WHERE NR_SEQUENCIA = :3""",
+            (mensagem, cod_requisicao, autorizacao.nr_sequencia),
+            "UPDATE HOS_AUTORIZACOES IMPEDIMENTO",
+        )
+
+    def _anexar_guia_tasy(self, autorizacao: Autorizacao, pdfs: list) -> None:
+        """Renomeia o PDF, copia para o storage do Tasy e insere registro na tabela."""
+        nr_atend = autorizacao.nr_atendimento
+        nr_seq = autorizacao.nr_sequencia
+        tasy_storage = Path(self._config.caminho_tasy_storage)
+
+        cd_pessoa = ""
+        try:
+            cd_pessoa = str(
+                self._db.execute_scalar(
+                    "SELECT MAX(cd_pessoa_pf) FROM TASY.AMH_SING_PESSOA "
+                    "WHERE nr_atendimento = :1",
+                    (nr_atend,),
+                ) or ""
+            )
+        except Exception as e:
+            logger.warning("Erro ao obter cd_pessoa_pf | NrAtend=%s: %s",
+                           nr_atend, e)
+
+        for pdf in pdfs:
+            pdf_path = Path(pdf)
+            random_prefix = "".join(
+                random.choices(string.ascii_letters + string.digits, k=10))
+            nome_arquivo = (
+                f"{random_prefix}_{cd_pessoa}_{nr_atend}_GUIA_SPSADT.pdf")
+            novo_caminho = pdf_path.parent / nome_arquivo
+
+            try:
+                pdf_path.rename(novo_caminho)
+                shutil.copy2(str(novo_caminho), str(tasy_storage))
+                logger.info("PDF copiado para Tasy storage: %s | NrAtend=%s",
+                            nome_arquivo, nr_atend)
+            except Exception as e:
+                logger.warning("Erro ao copiar PDF para Tasy storage: %s", e)
+                continue
+
+            ds_arquivo = (
+                "tasy-storage://INSURANCE_AUTHORIZATION"
+                ".f7dbe696-caa7-42c1-be04-0ac9f4e77811"
+                f"/{nome_arquivo}?{nome_arquivo}"
+            )
+            self._executar_sql(
+                """INSERT INTO tasy.AUTORIZACAO_CONVENIO_ARQ (
+                       DT_ATUALIZACAO_NREC, IE_TIPO_DOCUMENTO_TISS, DS_OBSERVACAO,
+                       NM_USUARIO, NR_SEQUENCIA, NM_USUARIO_NREC, IE_ANEXAR_EMAIL,
+                       NR_SEQ_TIPO, NR_SEQUENCIA_AUTOR, DS_ARQUIVO, DT_ATUALIZACAO
+                   ) VALUES (
+                       sysdate,'16',null,'automacaotasy',
+                       TASY.AUTORIZACAO_CONVENIO_ARQ_seq.NEXTVAL,
+                       'automacaotasy','S',2,:1,:2,sysdate
+                   )""",
+                (str(nr_seq), ds_arquivo),
+                "INSERT AUTORIZACAO_CONVENIO_ARQ",
+            )
+            self._controle.registrar_log("INFO", "Inseriu Anexo no Tasy",
+                                         str(nr_atend))
+
+    def _atualizar_categoria_unimed(
+        self, autorizacao: Autorizacao, cod_guia: str
+    ) -> None:
+        """Determina e atualiza a categoria do plano Unimed com base no prefixo da guia.
+
+        Mapeamento do IBM RPA:
+          22... → categoria 1 (Pré-pagamento)
+          23... → categoria 2 (Intercâmbio)
+          21... → categoria 3 (CO Rio Preto)
+        """
+        nr_atend = autorizacao.nr_atendimento
+        cd_categoria: int | None = None
+
+        if cod_guia.startswith("22"):
+            cd_categoria = 1
+        elif cod_guia.startswith("23"):
+            cd_categoria = 2
+        elif cod_guia.startswith("21"):
+            cd_categoria = 3
+
+        self._controle.registrar_log(
+            "INFO",
+            f"Unimed — Categoria [{cd_categoria}] | Guia [{cod_guia}]",
+            str(nr_atend),
+        )
+
+        if cd_categoria is None:
+            logger.info("Categoria Unimed não identificada para guia %s | NrAtend=%s",
+                        cod_guia, nr_atend)
+            return
+
+        dt_vigencia = (
+            autorizacao.dt_inicio_vigencia_eup or autorizacao.dt_entrada
+        )
+        self._executar_sql(
+            """BEGIN
+                   TASY.RPA_ATUALIZA_ATEND_CATEGORIA(
+                       :1,  -- w_nr_atendimento
+                       :2,  -- w_cd_convenio
+                       :3,  -- w_cd_categoria_antigo
+                       :4,  -- w_dt_inicio_vigencia
+                       'automacaotasy',
+                       3,   -- p_cd_tipo_acomodacao_novo
+                       :5   -- p_cd_categoria_novo
+                   );
+               END;""",
+            (
+                autorizacao.nr_atendimento,
+                autorizacao.cd_convenio,
+                autorizacao.cd_categoria or "",
+                dt_vigencia,
+                str(cd_categoria),
+            ),
+            "RPA_ATUALIZA_ATEND_CATEGORIA",
+        )
+
+    def _executar_sql(
+        self, sql: str, params: tuple, descricao: str = ""
+    ) -> None:
+        """Executa SQL com log de erro sem interromper o fluxo."""
+        try:
+            self._db.execute_non_query(sql, params)
+            if descricao:
+                logger.debug("OK: %s", descricao)
+        except Exception as e:
+            logger.error("Erro em %s: %s", descricao or "SQL", e)
 
     def _atualizar_falha_banco(self, autorizacao: Autorizacao, mensagem: str) -> None:
         """Registra o impedimento nos dois bancos após falha no SPSADT.
@@ -261,4 +619,12 @@ class ProcessarAutorizacaoUseCase:
             logger.error(
                 "Erro ao atualizar HOS_AUTORIZACOES — NrSeq=%s: %s",
                 autorizacao.nr_sequencia, e,
+            )
+
+        if self._notificador:
+            self._notificador.notificar_erro(
+                f"[{self._config.rpa_script_name}]\n"
+                f"#Falha no script\n"
+                f"NrAtendimento: {autorizacao.nr_atendimento} -\n\n"
+                f"MensagemErro: {mensagem}"
             )

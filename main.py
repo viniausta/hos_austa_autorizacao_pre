@@ -6,6 +6,7 @@ Toda lógica de negócio está na camada application/.
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 from typing import Optional
 
@@ -19,6 +20,44 @@ from infrastructure.browser.page_objects.login_page import LoginPage
 from infrastructure.notifications.cliq_notificador import CliqNotificador
 from application.services.controle_execucao_service import ControleExecucaoService
 from application.use_cases.processar_autorizacao import ProcessarAutorizacaoUseCase
+
+
+def _mapear_unidades_de_rede(config: "Settings") -> None:
+    """Mapeia (ou remapeia) os compartilhamentos de rede necessários para a automação.
+
+    Executado uma vez ao iniciar, garante que os paths de rede estejam acessíveis
+    antes de qualquer operação de leitura/escrita de arquivos.
+    """
+    compartilhamentos = [
+        r"\\10.100.0.110\tasyhospausta",
+        r"\\172.20.255.13\tasyausta\anexo_opme",
+    ]
+    usuario = config.caminho_rede_anexo
+    senha = config.senha_rede_anexo
+
+    for caminho in compartilhamentos:
+        try:
+            subprocess.run(
+                ["net", "use", caminho, "/delete", "/y"],
+                capture_output=True,
+                check=False,
+            )
+            resultado = subprocess.run(
+                ["net", "use", caminho, f"/user:{usuario}", senha, "/persistent:yes"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if resultado.returncode == 0:
+                logger.info("Unidade de rede mapeada: %s", caminho)
+            else:
+                logger.warning(
+                    "Falha ao mapear '%s': %s",
+                    caminho,
+                    (resultado.stderr or resultado.stdout).strip(),
+                )
+        except Exception as e:
+            logger.warning("Erro ao mapear unidade de rede '%s': %s", caminho, e)
 
 
 def main() -> int:
@@ -35,9 +74,14 @@ def main() -> int:
         config.dev_mode,
     )
 
+    # Mapeia unidades de rede antes de qualquer operação de arquivo
+    _mapear_unidades_de_rede(config)
+
     # Prepara diretórios necessários
     config.caminho_padrao.mkdir(parents=True, exist_ok=True)
     (config.caminho_padrao / "Evidencia").mkdir(parents=True, exist_ok=True)
+    caminho_download = config.caminho_padrao / "download"
+    caminho_download.mkdir(parents=True, exist_ok=True)
 
     db: Optional[OracleClient] = None
     browser: Optional[WebController] = None
@@ -53,15 +97,31 @@ def main() -> int:
         if selenium_remote_url:
             logger.info("Modo Docker: conectando ao Selenium em %s",
                         selenium_remote_url)
-        browser = WebController(remote_url=selenium_remote_url)
+        browser = WebController(
+            remote_url=selenium_remote_url,
+            caminho_download=str(caminho_download),
+        )
 
         # -----------------------------------------------------------------
-        # Notificador (opcional — só ativo se CLIQ_WEBHOOK_URL configurada)
+        # Notificador (opcional — só ativo se credenciais Zoho configuradas)
         # -----------------------------------------------------------------
-        webhook_url = os.environ.get("CLIQ_WEBHOOK_URL")
-        notificador = CliqNotificador(webhook_url) if webhook_url else None
-        if notificador:
-            logger.info("Notificador Cliq ativo.")
+        notificador = None
+        if all([
+            config.zoho_client_id,
+            config.zoho_client_secret,
+            config.zoho_refresh_token,
+            config.cliq_canal_normal,
+            config.cliq_canal_erro,
+        ]):
+            notificador = CliqNotificador(
+                client_id=config.zoho_client_id,
+                client_secret=config.zoho_client_secret,
+                refresh_token=config.zoho_refresh_token,
+                canal_normal=config.cliq_canal_normal,
+                canal_erro=config.cliq_canal_erro,
+                dev_mode=config.dev_mode,
+            )
+            logger.info("Notificador Cliq ativo (DEV=%s).", config.dev_mode)
 
         # -----------------------------------------------------------------
         # Serviço de controle de execução
@@ -83,7 +143,12 @@ def main() -> int:
             config=config,
             db=db,
             login=LoginPage(browser),
-            autorizacao=SpsadtPage(browser, dev_mode=config.dev_mode),
+            autorizacao=SpsadtPage(
+                browser,
+                caminho_download=str(caminho_download),
+                caminho_backup=config.caminho_backup_guia,
+                dev_mode=config.dev_mode,
+            ),
             controle=controle,
             notificador=notificador,
         )
