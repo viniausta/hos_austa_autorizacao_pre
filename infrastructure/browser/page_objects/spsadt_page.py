@@ -138,6 +138,47 @@ class SpsadtPage:
                 logger.debug("Keep-alive: clicou em 'Dossiê beneficiário'.")
         except Exception as e:
             logger.debug("Keep-alive ignorado: %s", e)
+    
+    def fechar_popup_impressao(self, autorizacao: Autorizacao) -> None:
+        """Fecha abas de prévia de impressão (even if about:blank) mantendo "Portal da operadora".
+        
+        A aba de impressão pode abrir como about:blank e nunca carregar completamente.
+        Ao invés de esperar o título carregar, este método aguarda um pouco e depois
+        fecha TODAS as abas extras, independentemente do estado delas.
+        
+        Args:
+            autorizacao: Entidade com dados do atendimento (para log).
+        """
+        try:
+            # Aguarda a aba abrir (mesmo que como about:blank)
+            time.sleep(1)
+            
+            # Obtém todas as abas abertas
+            abas = self._browser.driver.window_handles
+            aba_principal = None
+            
+            # Encontra a aba "Portal da operadora"
+            for aba in abas:
+                self._browser.driver.switch_to.window(aba)
+                if "Portal da operadora" in self._browser.driver.title:
+                    aba_principal = aba
+                    break
+            
+            # Fecha todas as abas EXCETO a principal
+            for aba in abas:
+                if aba != aba_principal:
+                    self._browser.driver.switch_to.window(aba)
+                    self._browser.driver.close()
+            
+            # Volta para a aba principal
+            if aba_principal:
+                self._browser.driver.switch_to.window(aba_principal)
+            
+            logger.info("Janela de impressão fechada | NrAtend=%s",
+                        autorizacao.nr_atendimento)
+        except Exception as e:
+            logger.warning("Erro ao fechar aba de impressão: %s", e)
+
 
     def processar(self, autorizacao: Autorizacao) -> Optional[dict]:
         """Executa o fluxo completo de SPSADT para um atendimento.
@@ -157,6 +198,7 @@ class SpsadtPage:
 
         try:
 
+            
             # Acessa a tela de SPSADT a partir do menu principal, garantindo que a página carregou
             self._acessar_tela_spsadt(autorizacao)
             # Consulta e valida o beneficiário pela carteirinha
@@ -629,29 +671,7 @@ class SpsadtPage:
         logger.info("Ícone de impressão clicado | NrAtend=%s",
                     autorizacao.nr_atendimento)
 
-        # 3. Aguarda nova janela/aba de print preview abrir.
-        #    Com plugins.always_open_pdf_externally=True o Chrome baixa direto
-        #    (sem abrir aba); nesse caso encontrou=False é esperado e o fluxo
-        #    continua normalmente aguardando o arquivo na pasta de download.
-        #    Tenta primeiro pela URL (mais confiável), depois por título.
-        '''
-        encontrou = self._browser.localizar_ou_anexar_aba(
-            titulo_contem="Untitled", timeout=10)
-
-        if not encontrou:
-            encontrou = self._browser.localizar_ou_anexar_aba(
-                titulo_contem="Sem título", timeout=3)
-
-        if not encontrou:
-            encontrou = self._browser.localizar_ou_anexar_aba(
-                titulo_contem="pls_imprimirConsultaAut.action", timeout=1)
-
-        if not encontrou:
-            logger.info(
-                "Aba de impressão não detectada (PDF baixado diretamente) | NrAtend=%s",
-                autorizacao.nr_atendimento,
-            )
-        '''
+        
         # 4. Aguarda PDF aparecer na pasta de download (máx 10 tentativas × 2 s)
         pdfs = list(pasta_download.glob("*.pdf"))
         tentativas = 0
@@ -675,13 +695,11 @@ class SpsadtPage:
             except Exception as e:
                 logger.warning("Erro ao copiar PDF para backup: %s — %s",
                                pdf.name, e)
-
-        # 6. Fecha a janela popup (print preview)
-        self._browser.fechar_aba()
-        logger.info("Janela de impressão fechada | NrAtend=%s",
-                    autorizacao.nr_atendimento)
+        
         return pdfs
-
+    
+    
+    
     def _selecionar_acomodacao(self, acomodacao: str) -> None:
         """Seleciona o tipo de acomodação. Tenta 'Apartamento' e, se indisponível, 'Individual'."""
         try:

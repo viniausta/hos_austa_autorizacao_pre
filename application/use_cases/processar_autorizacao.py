@@ -46,7 +46,8 @@ WHERE
     AND dt_entrada > TRUNC(SYSDATE)
     AND cd_estabelecimento = :1
     AND ds_estagio = 'CM-Necessidade de Autorização - WS'
-    --and nr_atendimento = 314868 
+    --and nr_atendimento = 316211 
+    and tipo_autorizacao = 'Consulta'
     --fetch first 1 rows only
 """
 
@@ -95,7 +96,7 @@ class ProcessarAutorizacaoUseCase:
         self._realizar_login(url, usuario, senha)
 
         # Keep-alive: a cada _KEEP_ALIVE_IDLES ciclos ociosos (~5 min a 5s/ciclo)
-        # clica em "Requisição para autorização" para manter a sessão do portal.
+        # clica em Dossiê Beneficiário para manter a sessão do portal.
         _KEEP_ALIVE_IDLES = 60
         idle_count = 0
 
@@ -121,6 +122,7 @@ class ProcessarAutorizacaoUseCase:
 
             for autorizacao in autorizacoes:
                 self._processar_item(autorizacao)
+                
 
         self._controle.registrar_log(
             "INFO", "Loop encerrado — CONTINUAR_EXECUCAO=False.")
@@ -182,6 +184,7 @@ class ProcessarAutorizacaoUseCase:
         )
         try:
             resultado = self._autorizacao.processar(autorizacao)
+            self._autorizacao.manter_sessao()
             if resultado:
                 self._atualizar_resultado_banco(autorizacao, resultado)
 
@@ -192,6 +195,7 @@ class ProcessarAutorizacaoUseCase:
                         f"{resultado.get('status_portal', '')} - "
                         f"{resultado.get('mensagem', '')}"
                     )
+                    self._autorizacao.fechar_popup_impressao(autorizacao)
 
             self._controle.registrar_log(
                 "INFO",
@@ -202,6 +206,7 @@ class ProcessarAutorizacaoUseCase:
                 ),
                 str(autorizacao.nr_atendimento),
             )
+            
 
         except SpsadtFalhouError as e:
             logger.error(
