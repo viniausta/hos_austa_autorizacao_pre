@@ -46,9 +46,7 @@ WHERE
     AND dt_entrada > TRUNC(SYSDATE)
     AND cd_estabelecimento = :1
     AND ds_estagio = 'CM-Necessidade de Autorização - WS'
-    --and nr_atendimento = 316211 
-    and tipo_autorizacao = 'Consulta'
-    --fetch first 1 rows only
+    --and nr_atendimento = 316211
 """
 
 
