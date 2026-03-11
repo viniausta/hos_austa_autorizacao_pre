@@ -203,7 +203,9 @@ class SpsadtPage:
             self._acessar_tela_spsadt(autorizacao)
             # Consulta e valida o beneficiário pela carteirinha
             if not self._consultar_beneficiario(autorizacao):
-                return False
+                raise SpsadtFalhouError(
+                    f"Falha ao consultar/cadastrar beneficiário — NrAtend={autorizacao.nr_atendimento}"
+                )
             # Preenche os campos do formulário SPSADT e submete
             submetido = self._preencher_dados_spsadt(autorizacao)
             if submetido:

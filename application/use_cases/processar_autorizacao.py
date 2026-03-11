@@ -226,6 +226,7 @@ class ProcessarAutorizacaoUseCase:
                 f"Erro ao processar NrAtend={autorizacao.nr_atendimento}: {e}",
                 str(autorizacao.nr_atendimento),
             )
+            self._atualizar_falha_banco(autorizacao, str(e))
             if self._notificador:
                 self._notificador.notificar_erro(
                     f"[{self._config.rpa_script_name}]\n"
