@@ -40,23 +40,13 @@ _NR_STATUS_DUPLICADO = 14
 # Query de busca — parâmetros dinâmicos evitam SQL injection e hardcodes
 # ---------------------------------------------------------------------------
 _SQL_AUTORIZACOES_PENDENTES = """
-    SELECT *
-    FROM (
-        SELECT bpm.*,
-               ROW_NUMBER() OVER (
-                   PARTITION BY nr_atendimento
-                   ORDER BY nr_sequencia
-               ) AS rn
-        FROM tasy.BPM_AUTORIZACOES_V bpm
+    select *  FROM tasy.BPM_AUTORIZACOES_V bpm
         WHERE ds_setor_origem = 'CM-Pronto Atendimento'
           AND ie_tipo_autorizacao IN (1, 6)
           AND cd_convenio IN (27)
           AND dt_entrada > TRUNC(SYSDATE)
           AND cd_estabelecimento = :1
           AND ds_estagio = 'CM-Necessidade de Autorização - WS'
-          --and nr_atendimento = ?
-    )
-    WHERE rn = 1
 """
 
 
@@ -193,120 +183,86 @@ class ProcessarAutorizacaoUseCase:
     def _verificar_e_inserir_autorizacao(self, autorizacao: Autorizacao) -> bool:
         """Verifica duplicidade e registra a autorização na base de controle RPA.
 
-
-
-        1. _tb_automacao  — HOS_AUTORIZACOES: mesmo nr_atendimento nos últimos 5 min.
-        2. _tb_tasy       — BPM_AUTORIZACOES_V: outra sequência do mesmo atendimento
-                            nos últimos 5 min (concorrência).
-        3. _tb_DataCorte  — BPM_AUTORIZACOES_V: sequência criada há mais de 2 min
-                            (stale — anterior ao ciclo atual do robô).
-
-        Se todos = 0  → INSERT em HOS_AUTORIZACOES com STATUS='PENDENTE', retorna True.
-        Se qualquer > 0 → marca impedimento 167 no TASY, loga e notifica, retorna False.
+        Se o mesmo nr_atendimento já foi processado nos últimos 5 minutos
+        (STATUS='PENDENTE' ou DT_EXECUCAO recente) → cancela esta autorização.
+        Caso contrário → INSERT STATUS='PENDENTE' e retorna True para processar.
         """
         try:
-            cnt_automacao = self._db.execute_scalar(
+            atendimento_recente = self._db.execute_scalar(
                 """SELECT COUNT(*)
                    FROM ROBO_RPA.HOS_AUTORIZACOES
-                   WHERE NR_ATENDIMENTO   = :1
-                     AND DT_AUTORIZACAO  >= SYSDATE - INTERVAL '5' MINUTE
-                     AND CD_ESTABELECIMENTO = :2""",
+                   WHERE NR_ATENDIMENTO     = :1
+                     AND CD_ESTABELECIMENTO = :2
+                     AND (
+                         STATUS     = 'PENDENTE'
+                         OR DT_EXECUCAO >= SYSDATE - INTERVAL '5' MINUTE
+                     )""",
                 (autorizacao.nr_atendimento, autorizacao.cd_estabelecimento),
             ) or 0
-
-            cnt_tasy = self._db.execute_scalar(
-                """SELECT COUNT(*)
-                   FROM tasy.BPM_AUTORIZACOES_V bpm
-                   WHERE NR_ATENDIMENTO    = :1
-                     AND NR_SEQUENCIA     != :2
-                     AND DT_AUTORIZACAO   >= SYSDATE - INTERVAL '5' MINUTE
-                     AND CD_ESTABELECIMENTO = :3
-                     AND CD_CONVENIO      IN (27)""",
-                (autorizacao.nr_atendimento, autorizacao.nr_sequencia,
-                 autorizacao.cd_estabelecimento),
-            ) or 0
-
-            cnt_data_corte = self._db.execute_scalar(
-                """SELECT COUNT(*)
-                   FROM tasy.BPM_AUTORIZACOES_V bpm
-                   WHERE NR_SEQUENCIA      = :1
-                     AND CD_ESTABELECIMENTO = :2
-                     AND DS_ESTAGIO        = 'CM-Necessidade de Autorização - WS'
-                     AND DT_AUTORIZACAO    < SYSDATE - (5 / (24 * 60))""",
-                (autorizacao.nr_sequencia, autorizacao.cd_estabelecimento),
-            ) or 0
-
         except Exception as e:
             logger.warning(
                 "Erro ao verificar duplicidade NrAtend=%s — continuando: %s",
                 autorizacao.nr_atendimento, e,
             )
-            return True  # falha na verificação não bloqueia o processamento
-
-        if cnt_automacao == 0 and cnt_tasy == 0 and cnt_data_corte == 0:
-            self._executar_sql(
-                """INSERT INTO ROBO_RPA.HOS_AUTORIZACOES (
-                       CONTROLE_EXECUCAO, NR_ATENDIMENTO, NR_SEQUENCIA,
-                       DT_AUTORIZACAO, TIPO_AUTORIZACAO, SETOR_ORIGEM,
-                       CD_CONVENIO, DS_CONVENIO, COD_CARTERINHA,
-                       DT_ENTRADA, STATUS, CD_ESTABELECIMENTO
-                   ) VALUES (
-                       :1, :2, :3, :4, :5, '**',
-                       :6, :7, :8, :9, 'PENDENTE', :10
-                   )""",
-                (
-                    self._controle.id_execucao,
-                    autorizacao.nr_atendimento,
-                    autorizacao.nr_sequencia,
-                    autorizacao.dt_autorizacao,
-                    autorizacao.tipo_autorizacao,
-                    autorizacao.cd_convenio,
-                    autorizacao.ds_convenio or "",
-                    autorizacao.cod_carterinha or "",
-                    autorizacao.dt_entrada,
-                    autorizacao.cd_estabelecimento,
-                ),
-                "INSERT HOS_AUTORIZACOES PENDENTE",
-            )
             return True
 
-        # --- Duplicata detectada ---
-        logger.warning(
-            "Duplicata detectada — NrAtend=%s | Seq=%s | "
-            "Automacao=%s | Tasy=%s | DataCorte=%s",
-            autorizacao.nr_atendimento, autorizacao.nr_sequencia,
-            cnt_automacao, cnt_tasy, cnt_data_corte,
+        if atendimento_recente:
+            logger.warning(
+                "Duplicata detectada — NrAtend=%s | Seq=%s — cancelando.",
+                autorizacao.nr_atendimento, autorizacao.nr_sequencia,
+            )
+            self._controle.registrar_log(
+                "WARN", "Autorização Cancelada - Duplicada", str(
+                    autorizacao.nr_atendimento)
+            )
+            try:
+                self._db.call_procedure(
+                    "TASY.ATUALIZAR_AUTORIZACAO_CONVENIO",
+                    {
+                        "NR_SEQUENCIA_P":        autorizacao.nr_sequencia,
+                        "NM_USUARIO_P":          "automacaotasy",
+                        "NR_SEQ_ESTAGIO_P":      _NR_STATUS_DUPLICADO,
+                        "IE_CONTA_PARTICULAR_P": "N",
+                        "IE_CONTA_CONVENIO_P":   "N",
+                        "IE_COMMIT_P":           "S",
+                    },
+                )
+            except Exception as e:
+                logger.error("Erro ao cancelar duplicata NrSeq=%s: %s",
+                             autorizacao.nr_sequencia, e)
+            if self._notificador:
+                self._notificador.notificar_alerta(
+                    f"[{self._config.rpa_script_name}] "
+                    f"#NrAtend: {autorizacao.nr_atendimento}/{autorizacao.nr_sequencia} > "
+                    f"Duplicata cancelada"
+                )
+            return False
+
+        self._executar_sql(
+            """INSERT INTO ROBO_RPA.HOS_AUTORIZACOES (
+                   CONTROLE_EXECUCAO, NR_ATENDIMENTO, NR_SEQUENCIA,
+                   DT_AUTORIZACAO, TIPO_AUTORIZACAO, SETOR_ORIGEM,
+                   CD_CONVENIO, DS_CONVENIO, COD_CARTERINHA,
+                   DT_ENTRADA, STATUS, CD_ESTABELECIMENTO
+               ) VALUES (
+                   :1, :2, :3, :4, :5, '**',
+                   :6, :7, :8, :9, 'PENDENTE', :10
+               )""",
+            (
+                self._controle.id_execucao,
+                autorizacao.nr_atendimento,
+                autorizacao.nr_sequencia,
+                autorizacao.dt_autorizacao,
+                autorizacao.tipo_autorizacao,
+                autorizacao.cd_convenio,
+                autorizacao.ds_convenio or "",
+                autorizacao.cod_carterinha or "",
+                autorizacao.dt_entrada,
+                autorizacao.cd_estabelecimento,
+            ),
+            "INSERT HOS_AUTORIZACOES PENDENTE",
         )
-        self._controle.registrar_log(
-            "WARN",
-            "Autorização Cancelada - Duplicada",
-            str(autorizacao.nr_atendimento),
-        )
-        try:
-            self._db.call_procedure(
-                "TASY.ATUALIZAR_AUTORIZACAO_CONVENIO",
-                {
-                    "NR_SEQUENCIA_P":       autorizacao.nr_sequencia,
-                    "NM_USUARIO_P":         "automacaotasy",
-                    "NR_SEQ_ESTAGIO_P":     _NR_STATUS_DUPLICADO,
-                    "IE_CONTA_PARTICULAR_P": "N",
-                    "IE_CONTA_CONVENIO_P":  "N",
-                    "IE_COMMIT_P":          "S",
-                },
-            )
-        except Exception as e:
-            logger.error(
-                "Erro ao marcar duplicata NrSeq=%s: %s",
-                autorizacao.nr_sequencia, e,
-            )
-        if self._notificador:
-            self._notificador.notificar_alerta(
-                f"[{self._config.rpa_script_name}] "
-                f"#NrAtend: {autorizacao.nr_atendimento}/{autorizacao.nr_sequencia} > "
-                f"Registro duplicado — "
-                f"T: {cnt_tasy} / A: {cnt_automacao} / D: {cnt_data_corte}"
-            )
-        return False
+        return True
 
     def _buscar_autorizacoes_pendentes(self) -> List[Autorizacao]:
         """Consulta autorizações pendentes no banco de dados."""
