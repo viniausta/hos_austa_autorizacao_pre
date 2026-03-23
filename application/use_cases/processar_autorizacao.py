@@ -37,16 +37,22 @@ _NR_STATUS_IMPEDIMENTO = 167
 # ---------------------------------------------------------------------------
 _SQL_AUTORIZACOES_PENDENTES = """
     SELECT *
-FROM
-    tasy.BPM_AUTORIZACOES_V bpm
-WHERE
-    ds_setor_origem = 'CM-Pronto Atendimento'
-    AND ie_tipo_autorizacao IN (1, 6)
-    AND cd_convenio IN (27)
-    AND dt_entrada > TRUNC(SYSDATE)
-    AND cd_estabelecimento = :1
-    AND ds_estagio = 'CM-Necessidade de Autorização - WS'
-    --and nr_atendimento = 316211
+    FROM (
+        SELECT bpm.*,
+               ROW_NUMBER() OVER (
+                   PARTITION BY nr_atendimento
+                   ORDER BY nr_sequencia
+               ) AS rn
+        FROM tasy.BPM_AUTORIZACOES_V bpm
+        WHERE ds_setor_origem = 'CM-Pronto Atendimento'
+          AND ie_tipo_autorizacao IN (1, 6)
+          AND cd_convenio IN (27)
+          AND dt_entrada > TRUNC(SYSDATE)
+          AND cd_estabelecimento = :1
+          AND ds_estagio = 'CM-Necessidade de Autorização - WS'
+          --and nr_atendimento = ?
+    )
+    WHERE rn = 1
 """
 
 
@@ -99,28 +105,42 @@ class ProcessarAutorizacaoUseCase:
         idle_count = 0
 
         while self._deve_continuar():
-            autorizacoes = self._buscar_autorizacoes_pendentes()
+            try:
+                autorizacoes = self._buscar_autorizacoes_pendentes()
 
-            if not autorizacoes:
-                idle_count += 1
-                if idle_count >= _KEEP_ALIVE_IDLES:
-                    logger.info("Keep-alive: mantendo sessão do portal ativa.")
-                    self._autorizacao.manter_sessao()
-                    idle_count = 0
-                logger.info("Nenhuma autorização pendente. Aguardando 5s...")
+                if not autorizacoes:
+                    idle_count += 1
+                    if idle_count >= _KEEP_ALIVE_IDLES:
+                        logger.info("Keep-alive: mantendo sessão do portal ativa.")
+                        self._autorizacao.manter_sessao()
+                        idle_count = 0
+                    logger.info("Nenhuma autorização pendente. Aguardando 5s...")
+                    time.sleep(5)
+                    continue
+
+                idle_count = 0
+                logger.info(
+                    "%d autorização(ões) encontrada(s) para processar.", len(autorizacoes))
+                self._controle.registrar_log(
+                    "INFO", f"{len(autorizacoes)} autorização(ões) encontrada(s)."
+                )
+
+                for autorizacao in autorizacoes:
+                    self._processar_item(autorizacao)
+
+            except Exception as e:
+                logger.exception(
+                    "Erro inesperado no ciclo principal — RPA continua: %s", e
+                )
+                self._controle.registrar_log(
+                    "ERROR", f"Erro inesperado no ciclo principal: {e}"
+                )
+                if self._notificador:
+                    self._notificador.notificar_erro(
+                        f"[{self._config.rpa_script_name}] Erro no ciclo principal — RPA continua",
+                        detalhes=str(e),
+                    )
                 time.sleep(5)
-                continue
-
-            idle_count = 0
-            logger.info(
-                "%d autorização(ões) encontrada(s) para processar.", len(autorizacoes))
-            self._controle.registrar_log(
-                "INFO", f"{len(autorizacoes)} autorização(ões) encontrada(s)."
-            )
-
-            for autorizacao in autorizacoes:
-                self._processar_item(autorizacao)
-                
 
         self._controle.registrar_log(
             "INFO", "Loop encerrado — CONTINUAR_EXECUCAO=False.")
@@ -146,8 +166,18 @@ class ProcessarAutorizacaoUseCase:
             raise
 
     def _deve_continuar(self) -> bool:
-        """Consulta o banco para saber se o loop deve continuar."""
+        """Consulta o banco para saber se o loop deve continuar.
+
+        Se o parâmetro não puder ser obtido (falha temporária de BD),
+        mantém o loop ativo para recuperação automática.
+        """
         raw = self._controle.obter_parametro("CONTINUAR_EXECUCAO")
+        if raw is None:
+            logger.warning(
+                "CONTINUAR_EXECUCAO não obtido (possível falha temporária no banco) "
+                "— mantendo loop ativo."
+            )
+            return True
         continuar = str(raw).strip().upper() in (
             "1", "TRUE", "S", "SIM", "YES")
         if not continuar:
@@ -182,7 +212,6 @@ class ProcessarAutorizacaoUseCase:
         )
         try:
             resultado = self._autorizacao.processar(autorizacao)
-            self._autorizacao.manter_sessao()
             if resultado:
                 self._atualizar_resultado_banco(autorizacao, resultado)
 
@@ -195,6 +224,10 @@ class ProcessarAutorizacaoUseCase:
                     )
                     self._autorizacao.fechar_popup_impressao(autorizacao)
 
+            # manter_sessao após a atualização do banco — evita que uma falha
+            # no keep-alive interfira no resultado já gravado.
+            self._autorizacao.manter_sessao()
+
             self._controle.registrar_log(
                 "INFO",
                 (
@@ -204,7 +237,7 @@ class ProcessarAutorizacaoUseCase:
                 ),
                 str(autorizacao.nr_atendimento),
             )
-            
+
 
         except SpsadtFalhouError as e:
             logger.error(
