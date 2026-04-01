@@ -2,11 +2,13 @@
 
 Gerencia conexão com o banco Oracle usando oracledb, com suporte automático
 ao modo thin (sem Instant Client) e fallback para thick (com Instant Client).
+Também implementa reconexão automática com retry exponencial.
 """
 from __future__ import annotations
 
 import logging
 import os
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -48,6 +50,11 @@ class OracleClient:
             int(config.db_port or 1521),
             service_name=config.db_service,
         )
+        self._dsn = dsn
+        self._db_user = config.db_user
+        self._db_password = config.db_password
+        self._retry_delay = 2
+        self._max_retry = 5
         self.conn = self._conectar(dsn, config.db_user, config.db_password)
         logger.info(
             "Conectado ao Oracle em %s:%s/%s",
@@ -109,6 +116,49 @@ class OracleClient:
         return None
 
     # ------------------------------------------------------------------
+    # Reconexão automática
+    # ------------------------------------------------------------------
+
+    def _verificar_conexao(self) -> None:
+        """Verifica se a conexão está ativa; reconecta se necessário."""
+        try:
+            self.conn.ping()
+        except Exception as e:
+            logger.warning("Conexão perdida: %s — tentando reconectar...", str(e)[:100])
+            self._reconectar_com_retry()
+
+    def _reconectar_com_retry(self) -> None:
+        """Tenta reconectar com backoff exponencial."""
+        delay = self._retry_delay
+        for tentativa in range(1, self._max_retry + 1):
+            try:
+                logger.info(
+                    "Reconexão — tentativa %d/%d (aguardando %ds)...",
+                    tentativa,
+                    self._max_retry,
+                    delay,
+                )
+                time.sleep(delay)
+                self.conn = oracledb.connect(
+                    user=self._db_user,
+                    password=self._db_password,
+                    dsn=self._dsn,
+                )
+                logger.info("Reconexão bem-sucedida!")
+                return
+            except Exception as e:
+                logger.warning(
+                    "Falha na tentativa %d: %s",
+                    tentativa,
+                    str(e)[:100],
+                )
+                delay = min(delay * 2, 60)  # Exponencial, máximo 60s
+                if tentativa == self._max_retry:
+                    raise BancoDadosError(
+                        f"Falha ao reconectar após {self._max_retry} tentativas: {e}"
+                    ) from e
+
+    # ------------------------------------------------------------------
     # DatabasePort — implementação
     # ------------------------------------------------------------------
 
@@ -117,6 +167,7 @@ class OracleClient:
     ) -> List[Dict[str, Any]]:
         """Executa uma consulta SQL e retorna lista de dicionários."""
         logger.debug("execute_query: %s | params=%s", sql[:120], params)
+        self._verificar_conexao()
         try:
             cur = self.conn.cursor()
             cur.execute(sql, params) if params else cur.execute(sql)
@@ -131,6 +182,7 @@ class OracleClient:
         self, sql: str, params: Optional[Tuple] = None
     ) -> Any:
         """Executa uma consulta e retorna o primeiro valor da primeira linha."""
+        self._verificar_conexao()
         try:
             cur = self.conn.cursor()
             cur.execute(sql, params) if params else cur.execute(sql)
@@ -145,6 +197,7 @@ class OracleClient:
     ) -> None:
         """Executa um DML (INSERT/UPDATE/DELETE) com commit automático."""
         logger.debug("execute_non_query: %s | params=%s", sql[:120], params)
+        self._verificar_conexao()
         try:
             cur = self.conn.cursor()
             cur.execute(sql, params) if params else cur.execute(sql)
@@ -156,6 +209,7 @@ class OracleClient:
     def call_procedure(self, name: str, params: Dict[str, Any]) -> None:
         """Executa uma stored procedure sem parâmetros OUT."""
         logger.debug("call_procedure: %s | params=%s", name, list(params.keys()))
+        self._verificar_conexao()
         try:
             cur = self.conn.cursor()
             cur.callproc(name, list(params.values()))
@@ -186,6 +240,7 @@ class OracleClient:
             list(params.keys()),
             list(output_params.keys()),
         )
+        self._verificar_conexao()
         try:
             cur = self.conn.cursor()
             all_params = dict(params)

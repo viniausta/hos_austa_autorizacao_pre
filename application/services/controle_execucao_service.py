@@ -5,19 +5,27 @@ Responsável por:
 - Persistir logs de execução (PR_REGISTRAR_LOG)
 - Registrar o encerramento (PR_FINALIZAR_EXECUCAO)
 - Obter parâmetros configuráveis (RPA_PARAMETRO_OBTER)
+
+Também notifica falhas críticas de banco de dados via notificador para alertar a equipe.
 """
 from __future__ import annotations
 
 import logging
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from core.ports.database_port import DatabasePort
+
+if TYPE_CHECKING:
+    from core.ports.notificador_port import NotificadorPort
 
 logger = logging.getLogger(__name__)
 
 
 class ControleExecucaoService:
-    """Gerencia o ciclo de vida da execução do robô no banco de dados."""
+    """Gerencia o ciclo de vida da execução do robô no banco de dados.
+    
+    Integrado com o notificador para alertar sobre falhas críticas de banco de dados.
+    """
 
     def __init__(
         self,
@@ -25,11 +33,13 @@ class ControleExecucaoService:
         id_unidade: int,
         id_projeto: int,
         dev_mode: bool,
+        notificador: Optional[NotificadorPort] = None,
     ) -> None:
         self._db = db
         self._id_unidade = id_unidade
         self._id_projeto = id_projeto
         self._dev_mode = dev_mode
+        self._notificador = notificador
         self.id_execucao: Optional[int] = None
 
     # ------------------------------------------------------------------
@@ -173,4 +183,10 @@ class ControleExecucaoService:
             return valor
         except Exception as e:
             logger.exception("Erro ao obter parâmetro '%s': %s", chave, e)
+            # Notifica erro crítico de banco de dados se notificador disponível
+            if self._notificador and "not connected" in str(e).lower():
+                self._notificador.notificar_erro(
+                    titulo="Erro Crítico de Banco de Dados",
+                    mensagem=f"Falha ao obter parâmetro '{chave}': {str(e)[:200]}",
+                )
             return None
