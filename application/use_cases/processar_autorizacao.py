@@ -645,52 +645,6 @@ class ProcessarAutorizacaoUseCase:
             "UPDATE HOS_AUTORIZACOES IMPEDIMENTO",
         )
 
-    def _copiar_pdf_smb(self, arquivo_local: Path, nome_destino: str, nr_atend: str = "") -> bool:
-        """Envia o PDF diretamente para o share SMB do Tasy via SMB2/3 (smbclient).
-
-        Usado quando o container Linux não consegue montar o UNC path via Docker.
-        Retorna True em sucesso, False em falha (sem lançar exceção).
-        """
-        try:
-            import smbclient as smb  # type: ignore
-        except ImportError:
-            logger.error("smbclient não instalado — impossível usar SMB direto")
-            return False
-
-        server = self._config.tasy_smb_server
-        share = self._config.tasy_smb_share
-        if not server or not share:
-            return False
-
-        # caminho_rede_anexo = "intensicare\robo.rpa" → domain\user
-        rede = self._config.caminho_rede_anexo
-        partes = rede.split("\\", 1)
-        username = f"{partes[0]}\\{partes[1]}" if len(partes) == 2 else rede
-
-        # Pasta dentro do share: nome final de caminho_tasy_storage
-        # ex: "/mnt/tasy-storage/anexo_opme" → "anexo_opme"
-        pasta_share = Path(self._config.caminho_tasy_storage).name
-        caminho_remoto = f"\\\\{server}\\{share}\\{pasta_share}\\{nome_destino}"
-
-        try:
-            smb.register_session(
-                server,
-                username=username,
-                password=self._config.senha_rede_anexo,
-            )
-            dados = arquivo_local.read_bytes()
-            with smb.open_file(caminho_remoto, mode="wb") as f:
-                f.write(dados)
-
-            logger.info(
-                "PDF enviado via SMB: %s (%d bytes) | NrAtend=%s",
-                caminho_remoto, len(dados), nr_atend,
-            )
-            return True
-        except Exception as e:
-            logger.error("Erro SMB ao enviar %s: %s | NrAtend=%s", nome_destino, e, nr_atend)
-            return False
-
     def _anexar_guia_tasy(self, autorizacao: Autorizacao, pdfs: list) -> None:
         """Renomeia o PDF, copia para o storage do Tasy e insere registro na tabela."""
         if not self._config.caminho_tasy_storage:
@@ -727,28 +681,12 @@ class ProcessarAutorizacaoUseCase:
 
             try:
                 pdf_path.rename(novo_caminho)
+                shutil.copy2(str(novo_caminho), str(tasy_storage))
+                logger.info("PDF copiado para Tasy storage: %s | NrAtend=%s",
+                            nome_arquivo, nr_atend)
             except Exception as e:
-                logger.warning("Erro ao renomear PDF: %s | NrAtend=%s", e, nr_atend)
+                logger.warning("Erro ao copiar PDF para Tasy storage: %s", e)
                 continue
-
-            # Tenta SMB direto (container Linux → share de rede do Tasy)
-            copiado = False
-            if self._config.tasy_smb_server and self._config.tasy_smb_share:
-                copiado = self._copiar_pdf_smb(novo_caminho, nome_arquivo, str(nr_atend))
-                if not copiado:
-                    logger.warning(
-                        "SMB falhou — tentando shutil como fallback | NrAtend=%s", nr_atend)
-
-            if not copiado:
-                try:
-                    shutil.copy2(str(novo_caminho), str(tasy_storage))
-                    logger.info("PDF copiado para Tasy storage (shutil): %s | NrAtend=%s",
-                                nome_arquivo, nr_atend)
-                    copiado = True
-                except Exception as e:
-                    logger.warning("Erro ao copiar PDF para Tasy storage: %s | NrAtend=%s",
-                                   e, nr_atend)
-                    continue
 
             ds_arquivo = (
                 "tasy-storage://INSURANCE_AUTHORIZATION"
@@ -770,13 +708,6 @@ class ProcessarAutorizacaoUseCase:
             )
             self._controle.registrar_log("INFO", "Inseriu Anexo no Tasy",
                                          str(nr_atend))
-
-            # Limpeza: remove PDF local do container (o arquivo no share de rede permanece)
-            try:
-                novo_caminho.unlink(missing_ok=True)
-                logger.debug("PDF local removido: %s | NrAtend=%s", novo_caminho, nr_atend)
-            except Exception as e:
-                logger.debug("Falha ao remover PDF local: %s | NrAtend=%s", e, nr_atend)
 
     def _atualizar_categoria_unimed(
         self, autorizacao: Autorizacao, cod_guia: str

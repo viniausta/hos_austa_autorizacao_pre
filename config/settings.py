@@ -62,10 +62,6 @@ class Settings:
     maezo_engine_rest_url: str  # URL base do CIB Seven, ex: http://maezo:8080
     api_port: int               # Porta do servidor FastAPI (padrão 8000)
 
-    # SMB direto — escrita no share do Tasy a partir do container Linux
-    tasy_smb_server: str  # IP ou hostname do servidor SMB, ex: 172.20.255.13
-    tasy_smb_share: str   # Nome do share, ex: tasyausta
-
     @classmethod
     def from_env(cls) -> "Settings":
         """Constrói Settings a partir das variáveis de ambiente (.env ou sistema)."""
@@ -108,6 +104,4 @@ class Settings:
             cliq_canal_erro=os.environ.get("CLIQ_CANAL_ERRO", ""),
             maezo_engine_rest_url=os.environ.get("MAEZO_ENGINE_REST_URL", ""),
             api_port=int(os.environ.get("API_PORT", "8000")),
-            tasy_smb_server=os.environ.get("TASY_SMB_SERVER", ""),
-            tasy_smb_share=os.environ.get("TASY_SMB_SHARE", ""),
         )

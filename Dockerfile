@@ -60,10 +60,6 @@ RUN pip install --no-cache-dir --upgrade pip \
 # Código da aplicação
 COPY . .
 
-# Cria pasta de storage do Tasy com permissão para escrita
-RUN mkdir -p /mnt/tasy-storage/anexo_opme \
-    && chmod 777 /mnt/tasy-storage/anexo_opme
-
 # Usuário não-root
 RUN useradd --create-home --shell /bin/bash ${APP_USER} \
     && chown -R ${APP_USER}:${APP_USER} ${APP_DIR}

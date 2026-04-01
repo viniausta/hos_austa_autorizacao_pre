@@ -10,7 +10,6 @@ Como adicionar um novo passo:
 """
 from __future__ import annotations
 
-import base64
 import logging
 import re
 import shutil
@@ -18,10 +17,6 @@ import time
 from datetime import date
 from pathlib import Path
 from typing import Optional
-
-import requests as _http
-import urllib3
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 from core.entities.autorizacao import Autorizacao
 from core.exceptions import SpsadtFalhouError
@@ -638,35 +633,28 @@ class SpsadtPage:
         }
 
     def _tasy_salvar_guia_tiss(self, autorizacao: Autorizacao, cod_guia: str) -> list:
-        """Clica no ícone de impressão, obtém o PDF da Guia TISS e copia para backup.
+        """Clica no ícone de impressão, aguarda o PDF da Guia TISS e copia para backup.
 
         Returns:
-            Lista de Path com os PDFs salvos na pasta de download.
+            Lista de Path com os PDFs encontrados na pasta de download.
 
-        Fluxo (Docker/Selenoid):
+        Fluxo:
           1. Limpa PDFs anteriores na pasta de download.
-          2. Registra as janelas abertas antes do clique.
-          3. Clica no ícone de impressão.
-          4. Aguarda nova janela/aba abrir (TASY abre o relatório em popup).
-          5. Captura o PDF pela URL da nova janela + cookies da sessão (requests).
-             Fallback blob: → execute_async_script  |  fallback final: Page.printToPDF (CDP).
-          6. Fecha a nova janela, volta para a janela original.
-
-        Fluxo (local/Windows — sem nova janela):
-          Após o clique, faz polling na pasta de download por até 20 s.
+          2. Clica no ícone de impressão.
+          3. Aguarda nova janela/aba (print preview) abrir.
+          4. Aguarda o PDF aparecer na pasta de download (máx 10 × 2 s).
+          5. Copia o PDF para o diretório de backup.
+          6. Fecha a janela popup.
         """
         pasta_download = Path(self._caminho_download)
-        pasta_download.mkdir(parents=True, exist_ok=True)
         hoje = date.today()
-        pasta_backup: Optional[Path] = None
-        if self._caminho_backup:
-            pasta_backup = (
-                Path(self._caminho_backup)
-                / str(hoje.year)
-                / f"{hoje.month:02d}"
-                / f"{hoje.day:02d}"
-            )
-            pasta_backup.mkdir(parents=True, exist_ok=True)
+        pasta_backup = (
+            Path(self._caminho_backup)
+            / str(hoje.year)
+            / f"{hoje.month:02d}"
+            / f"{hoje.day:02d}"
+        )
+        pasta_backup.mkdir(parents=True, exist_ok=True)
         logger.info("Salvando Guia TISS — CodGuia=%s | NrAtend=%s",
                     cod_guia, autorizacao.nr_atendimento)
 
@@ -680,217 +668,37 @@ class SpsadtPage:
                 logger.warning("Não foi possível remover PDF anterior: %s — %s",
                                pdf.name, e)
 
-        # 2. Registra janelas abertas antes do clique
-        janelas_antes = set(self._browser.driver.window_handles)
-
-        # 3. Captura a página de resultado via CDP ANTES de clicar em imprimir
-        #    O botão de imprimir do TASY no Selenoid abre about:blank sem conteúdo.
-        #    Capturamos a página atual (resultado com guia) como fallback garantido.
-        pdf_pagina_resultado: Optional[bytes] = None
-        try:
-            dados_cdp = self._browser.driver.execute_cdp_cmd(
-                "Page.printToPDF",
-                {"printBackground": True, "preferCSSPageSize": True},
-            )
-            pdf_pagina_resultado = base64.b64decode(dados_cdp["data"])
-            logger.info(
-                "PDF da página de resultado capturado via CDP — %d bytes | NrAtend=%s",
-                len(pdf_pagina_resultado), autorizacao.nr_atendimento,
-            )
-        except Exception as e:
-            logger.warning("CDP pré-clique falhou: %s | NrAtend=%s", e, autorizacao.nr_atendimento)
-
-        # 4. Clica no ícone de impressão
+        # 2. Clica no ícone de impressão
         self._browser.click_elemento(*self._SEL_ICONE_IMPRIMIR, timeout=30)
         logger.info("Ícone de impressão clicado | NrAtend=%s",
                     autorizacao.nr_atendimento)
 
-        pdfs: list = []
-
-        # 5‑7. Tenta capturar o PDF pela nova janela (funciona quando TASY abre relatório)
-        novas_janelas = self._aguardar_nova_janela(janelas_antes, timeout=8)
-        if novas_janelas:
-            handle = novas_janelas.pop()
-            pdf_bytes = self._capturar_pdf_janela(handle, autorizacao)
-            # Usa o PDF da janela somente se for substancialmente maior que o fallback
-            if pdf_bytes and len(pdf_bytes) > 2000:
-                nome = f"guia_tiss_{cod_guia}_{autorizacao.nr_atendimento}.pdf"
-                caminho = pasta_download / nome
-                caminho.write_bytes(pdf_bytes)
-                logger.info("PDF capturado da janela de impressão: %s (%d bytes) | NrAtend=%s",
-                            nome, len(pdf_bytes), autorizacao.nr_atendimento)
-                pdfs = [caminho]
-
-        # Se a janela não gerou PDF válido, usa o CDP capturado antes do clique
-        if not pdfs and pdf_pagina_resultado and len(pdf_pagina_resultado) > 500:
-            nome = f"guia_tiss_{cod_guia}_{autorizacao.nr_atendimento}.pdf"
-            caminho = pasta_download / nome
-            caminho.write_bytes(pdf_pagina_resultado)
-            logger.info("PDF gerado via CDP fallback (página resultado): %s (%d bytes) | NrAtend=%s",
-                        nome, len(pdf_pagina_resultado), autorizacao.nr_atendimento)
-            pdfs = [caminho]
-
-        # Fallback: polling do arquivo em disco (modo local sem popup)
-        if not pdfs:
-            tentativas = 0
-            lista = list(pasta_download.glob("*.pdf"))
-            while not lista and tentativas < 10:
-                tentativas += 1
-                time.sleep(2)
-                lista = list(pasta_download.glob("*.pdf"))
-            pdfs = lista
-            if not pdfs:
-                logger.warning("PDF da Guia TISS não obtido | NrAtend=%s",
+        
+        # 4. Aguarda PDF aparecer na pasta de download (máx 10 tentativas × 2 s)
+        pdfs = list(pasta_download.glob("*.pdf"))
+        tentativas = 0
+        while not pdfs:
+            tentativas += 1
+            time.sleep(2)
+            if tentativas >= 10:
+                logger.warning("Arquivo não recebido | NrAtend=%s",
                                autorizacao.nr_atendimento)
+                break
+            pdfs = list(pasta_download.glob("*.pdf"))
 
-        # Copia para backup (apenas se caminho configurado)
+        # 5. Para cada PDF: loga e copia para backup
         for pdf in pdfs:
-            logger.info("Arquivo obtido: %s | NrAtend=%s",
-                        Path(pdf).name, autorizacao.nr_atendimento)
-            if pasta_backup:
-                try:
-                    shutil.copy2(str(pdf), str(pasta_backup))
-                    logger.info("PDF copiado para backup: %s | NrAtend=%s",
-                                pasta_backup, autorizacao.nr_atendimento)
-                except Exception as e:
-                    logger.warning("Erro ao copiar PDF para backup: %s — %s",
-                                   Path(pdf).name, e)
-
-        return pdfs
-
-    def _aguardar_nova_janela(self, janelas_antes: set, timeout: int = 8) -> set:
-        """Aguarda até `timeout` s por uma nova aba/janela. Retorna o conjunto de novas handles."""
-        fim = time.time() + timeout
-        while time.time() < fim:
-            novas = set(self._browser.driver.window_handles) - janelas_antes
-            if novas:
-                return novas
-            time.sleep(0.5)
-        return set()
-
-    def _capturar_pdf_janela(
-        self, handle: str, autorizacao: Autorizacao
-    ) -> Optional[bytes]:
-        """Muda para a janela `handle`, obtém o conteúdo PDF e retorna os bytes.
-
-        Estratégias em ordem:
-          1. URL HTTP/HTTPS → requests.get com cookies da sessão.
-          2. blob: URL      → execute_async_script (fetch + ArrayBuffer).
-          3. Fallback CDP   → Page.printToPDF renderiza a página atual.
-        Ao sair, fecha a nova janela e volta para a janela original.
-        """
-        janela_original = self._browser.driver.current_window_handle
-        try:
-            self._browser.driver.switch_to.window(handle)
-
-            # Aguarda a página carregar conteúdo real (URL e corpo) — até 30s
-            # O TASY abre a janela como about:blank e injeta conteúdo via JS,
-            # por isso verificamos o tamanho do body em vez de só a URL.
-            fim_carga = time.time() + 30
-            while time.time() < fim_carga:
-                try:
-                    url_atual = self._browser.driver.current_url
-                    body_len = self._browser.driver.execute_script(
-                        "return document.body ? document.body.innerHTML.length : 0"
-                    )
-                    ready = self._browser.driver.execute_script(
-                        "return document.readyState"
-                    )
-                    # Página considerada pronta: saiu do blank OU tem conteúdo OU readyState=complete com corpo
-                    if url_atual not in ("about:blank", "", "about:newtab"):
-                        break
-                    if ready == "complete" and body_len > 500:
-                        break
-                except Exception:
-                    pass
-                time.sleep(0.5)
-
-            time.sleep(1)  # margem extra para renderização final
-
-            url = self._browser.driver.current_url
-            body_size = 0
+            logger.info("Arquivo obtido no download: %s | NrAtend=%s",
+                        pdf.name, autorizacao.nr_atendimento)
             try:
-                body_size = self._browser.driver.execute_script(
-                    "return document.body ? document.body.innerHTML.length : 0"
-                )
-            except Exception:
-                pass
-            logger.info(
-                "Janela de impressão: url=%s | body=%d bytes | NrAtend=%s",
-                url, body_size, autorizacao.nr_atendimento,
-            )
-
-            # 1. URL HTTP — baixa com requests reutilizando cookies da sessão
-            if url.startswith("http://") or url.startswith("https://"):
-                cookies = {c["name"]: c["value"]
-                           for c in self._browser.driver.get_cookies()}
-                try:
-                    resp = _http.get(url, cookies=cookies,
-                                     verify=False, timeout=30)
-                    content_type = resp.headers.get("Content-Type", "")
-                    if resp.status_code == 200 and "pdf" in content_type.lower():
-                        logger.info("PDF baixado via HTTP | NrAtend=%s",
-                                    autorizacao.nr_atendimento)
-                        return resp.content
-                    # HTML de print preview — aguarda renderização completa antes do CDP
-                    logger.debug("Resposta HTTP é HTML — aguardando render completo | NrAtend=%s",
-                                 autorizacao.nr_atendimento)
-                    fim_render = time.time() + 15
-                    while time.time() < fim_render:
-                        estado = self._browser.driver.execute_script(
-                            "return document.readyState")
-                        if estado == "complete":
-                            break
-                        time.sleep(0.5)
-                    time.sleep(3)  # aguarda conteúdo dinâmico do relatório TASY
-                except Exception as e:
-                    logger.warning("Erro ao baixar PDF via HTTP: %s | NrAtend=%s",
-                                   e, autorizacao.nr_atendimento)
-
-            # 2. blob: URL — lê o conteúdo via fetch assíncrono no browser
-            elif url.startswith("blob:"):
-                resultado = self._browser.driver.execute_async_script(
-                    """
-                    var done = arguments[arguments.length - 1];
-                    fetch(arguments[0])
-                        .then(function(r) { return r.arrayBuffer(); })
-                        .then(function(buf) { done(Array.from(new Uint8Array(buf))); })
-                        .catch(function() { done(null); });
-                    """,
-                    url,
-                )
-                if resultado:
-                    logger.info("PDF capturado via blob | NrAtend=%s",
-                                autorizacao.nr_atendimento)
-                    return bytes(resultado)
-
-            # 3. Fallback CDP — renderiza a página atual como PDF
-            try:
-                pdf_data = self._browser.driver.execute_cdp_cmd(
-                    "Page.printToPDF",
-                    {"printBackground": True, "preferCSSPageSize": True},
-                )
-                pdf_bytes = base64.b64decode(pdf_data["data"])
-                logger.info(
-                    "PDF gerado via CDP Page.printToPDF — %d bytes | NrAtend=%s",
-                    len(pdf_bytes), autorizacao.nr_atendimento,
-                )
-                return pdf_bytes
+                shutil.copy2(str(pdf), str(pasta_backup))
+                logger.info("Arquivo copiado para: %s | NrAtend=%s",
+                            pasta_backup, autorizacao.nr_atendimento)
             except Exception as e:
-                logger.warning("Page.printToPDF falhou: %s | NrAtend=%s",
-                               e, autorizacao.nr_atendimento)
-
-        except Exception as e:
-            logger.warning("Erro ao capturar PDF da janela: %s | NrAtend=%s",
-                           e, autorizacao.nr_atendimento)
-        finally:
-            try:
-                self._browser.driver.close()
-            except Exception:
-                pass
-            self._browser.driver.switch_to.window(janela_original)
-
-        return None
+                logger.warning("Erro ao copiar PDF para backup: %s — %s",
+                               pdf.name, e)
+        
+        return pdfs
     
     
     
