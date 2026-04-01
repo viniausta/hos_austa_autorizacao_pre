@@ -2,8 +2,9 @@
 # docker-compose.yml — hos_austa_autorizacaopre
 #
 # Serviços:
-#   selenium  → Standalone Chrome com VNC embutido para debug visual
-#   rpa       → Robô Python conectado ao Selenium via Remote WebDriver
+#   selenoid     → Selenoid (sessões isoladas por container Chrome)
+#   selenoid-ui  → Dashboard visual em http://localhost:8080
+#   rpa          → Robô Python conectado ao Selenoid via Remote WebDriver
 #
 # Uso:
 #   docker compose up --build          → sobe tudo e reconstrói a imagem
@@ -12,65 +13,100 @@
 #   docker compose down                → para e remove containers
 #
 # Debug visual (ver o navegador ao vivo):
-#   Acesse http://localhost:7900 no browser (sem senha)
+#   Acesse http://localhost:8080 no browser (Selenoid-UI)
+#
+# IMPORTANTE — pull da imagem Chrome antes do primeiro uso:
+#   docker pull selenoid/vnc_chrome:128.0
 # =============================================================================
+
+# Rede nomeada explicitamente para que o Selenoid possa colocar
+# os containers de browser na mesma rede que o rpa.
+networks:
+  default:
+    name: austa-net
 
 services:
 
   # ---------------------------------------------------------------------------
-  # Selenium Standalone Chrome
+  # Selenoid — orquestrador de sessões WebDriver
+  #   - Cada sessão WebDriver ganha seu próprio container Chrome isolado
   #   - Expõe WebDriver na porta 4444 (consumido internamente pelo rpa)
-  #   - Expõe VNC na porta 7900 (acesso externo para debug visual)
-  #   - shm_size: evita crash do Chrome por falta de shared memory
+  #   - Requer acesso ao Docker socket para criar/destruir containers de browser
+  #   - browsers.json define qual imagem usar por versão de browser
   # ---------------------------------------------------------------------------
-  selenium:
-    image: selenium/standalone-chrome:latest
-    container_name: austa_selenium
-    shm_size: "2gb"
+  selenoid:
+    image: aerokube/selenoid:latest
+    container_name: austa_selenoid
     ports:
-      - "4444:4444"   # WebDriver API (acesso interno do rpa via http://selenium:4444)
-      - "7900:7900"   # noVNC — visualizar o navegador em http://localhost:7900
+      - "4444:4444"   # WebDriver API
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock   # Selenoid cria containers via Docker
+      - ./selenoid:/etc/selenoid:ro                  # browsers.json
+      - selenoid_logs:/opt/selenoid/logs
+    command: >
+      -conf /etc/selenoid/browsers.json
+      -log-output-dir /opt/selenoid/logs
+      -container-network austa-net
+      -limit 4
     environment:
-      - SE_NODE_MAX_SESSIONS=1
-      - SE_VNC_NO_PASSWORD=1          # Remove senha do VNC para facilitar debug
-      - SE_SCREEN_WIDTH=1920
-      - SE_SCREEN_HEIGHT=1080
-      - SE_START_XVFB=true
+      - TZ=America/Sao_Paulo
     healthcheck:
-      test: ["CMD", "curl", "-fsSL", "http://localhost:4444/wd/hub/status"]
+      test: ["CMD", "wget", "-qO/dev/null", "http://localhost:4444/status"]
       interval: 10s
       timeout: 5s
       retries: 10
-      start_period: 15s
+      start_period: 10s
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Selenoid-UI — dashboard visual das sessões ativas
+  #   - Acesse http://localhost:8080 para ver os browsers em tempo real
+  #   - Clique em qualquer sessão para abrir o VNC interativo
+  # ---------------------------------------------------------------------------
+  selenoid-ui:
+    image: aerokube/selenoid-ui:latest
+    container_name: austa_selenoid_ui
+    ports:
+      - "8080:8080"   # Dashboard → http://localhost:8080
+    command: ["--selenoid-uri", "http://selenoid:4444"]
+    depends_on:
+      - selenoid
     restart: unless-stopped
 
   # ---------------------------------------------------------------------------
   # Robô RPA (Python)
-  #   - Conecta ao Selenium via SELENIUM_REMOTE_URL
-  #   - Carrega configurações do .env
-  #   - Aguarda o Selenium estar healthy antes de iniciar
-  #   - restart: on-failure permite recuperação automática de falhas transitórias
+  #   - Em Linux nativo: roda no Docker, SMB direto para o share do TASY
+  #   - Em Windows: pode rodar no host (pip install + python api_server.py)
+  #     e conectar ao Selenoid via localhost:4444
+  #   - Aguarda o Selenoid estar healthy antes de iniciar
   # ---------------------------------------------------------------------------
   rpa:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: austa_rpa
+    hostname: "940-2023-00373"
+    command: python api_server.py
     env_file:
-      - .env                          # Carrega todas as variáveis do arquivo .env
+      - .env
     environment:
-      - SELENIUM_REMOTE_URL=http://selenium:4444/wd/hub   # Sobrescreve se definida no .env
+      - SELENIUM_REMOTE_URL=http://selenoid:4444/wd/hub
+      - ORACLE_INSTANT_CLIENT_DIR=/opt/oracle/instantclient_21_11
+    ports:
+      - "8000:8000"
     depends_on:
-      selenium:
-        condition: service_healthy    # Aguarda Selenium estar pronto antes de iniciar
-    restart: on-failure               # Reinicia automaticamente em caso de erro não esperado
+      selenoid:
+        condition: service_healthy
+    restart: on-failure
     volumes:
-      - ./logs:/app/logs              # Persiste logs fora do container
-      - evidencias:/app/Evidencia     # Volume nomeado para capturas de tela
+      - ./logs:/app/logs
+      - evidencias:/app/Evidencia
+      - ${TASY_STORAGE_HOST_PATH:-./tasy-storage}:/mnt/tasy-storage
 
 # ---------------------------------------------------------------------------
 # Volumes nomeados
 # ---------------------------------------------------------------------------
 volumes:
   evidencias:
+  selenoid_logs:
     driver: local

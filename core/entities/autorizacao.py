@@ -68,6 +68,46 @@ class Autorizacao:
             cd_ausencia_val_benef=row.get("cd_ausencia_val_benef"),
         )
 
+    @classmethod
+    def from_fhir_payload(cls, payload: Any) -> "Autorizacao":
+        """Constrói uma Autorizacao a partir do payload FHIR-inspired do MAEZO.
+
+        O payload (AutorizacaoFhirRequest) carrega todos os dados necessários
+        para preencher o portal Unimed — sem consulta Oracle para entrada.
+        O Oracle ainda é usado para gravar o resultado via procedures TASY.
+
+        Args:
+            payload: AutorizacaoFhirRequest validado pelo endpoint FastAPI.
+        """
+        dt_entrada = None
+        if payload.atendimento.dt_entrada:
+            try:
+                dt_entrada = datetime.fromisoformat(payload.atendimento.dt_entrada)
+            except ValueError:
+                dt_entrada = None
+
+        return cls(
+            nr_atendimento=payload.atendimento.nr_atendimento,
+            nr_sequencia=payload.atendimento.nr_sequencia,
+            cd_convenio=payload.cobertura.cd_convenio,
+            cd_estabelecimento=payload.atendimento.cd_estabelecimento,
+            cod_carterinha=payload.cobertura.carteirinha,
+            tipo_autorizacao="SPSADT-PRE",
+            dt_entrada=dt_entrada,
+            ds_convenio=payload.cobertura.ds_convenio,
+            cod_prestador=payload.prestador.cd_prestador,
+            nr_crm=payload.prestador.nr_crm,
+            ie_consulta_emergencia=payload.atendimento.ie_consulta_emergencia,
+            ds_carater_atendimento=payload.atendimento.ds_carater_atendimento,
+            ie_tipo_consulta=payload.atendimento.ie_tipo_consulta,
+            ie_tipo_atendimento=payload.atendimento.ie_tipo_atendimento,
+            ie_regime_atendimento=payload.atendimento.ie_regime_atendimento,
+            tp_acidente=payload.atendimento.tp_acidente,
+            ds_ind_clinica=payload.atendimento.ds_ind_clinica or None,
+            ds_observacao=payload.atendimento.ds_observacao or None,
+            cd_ausencia_val_benef=payload.atendimento.cd_ausencia_val_benef or None,
+        )
+
     def __str__(self) -> str:
         return (
             f"Autorizacao(nr_atendimento={self.nr_atendimento}, "

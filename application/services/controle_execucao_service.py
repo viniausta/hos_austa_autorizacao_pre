@@ -164,7 +164,7 @@ class ControleExecucaoService:
                     "P_ID_UNIDADE": un,
                     "P_ID_PROJETO": pr,
                     "P_CHAVE": chave,
-                    "P_DEV": str(dv),
+                    "P_DEV": "1" if dv else "0",
                 },
                 output_params={"P_VALOR": "VARCHAR"},
             )

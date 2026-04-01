@@ -1,0 +1,43 @@
+# =============================================================================
+# docker-compose.stub.yml — Ambiente de teste do fluxo completo
+#
+# Sobe o RPA em modo API + um stub que simula o CIB Seven (recebe callbacks).
+#
+# Uso:
+#   docker compose -f docker-compose.yml -f docker-compose.stub.yml up --build
+#
+# Depois de subir:
+#   • API RPA       → http://localhost:8000/docs
+#   • Stub CIB7     → http://localhost:9000/docs  (vê os callbacks recebidos)
+#   • Selenoid-UI   → http://localhost:8080        (ver browsers em tempo real)
+#
+# Enviar requisição de teste:
+#   python scripts/test_stub.py
+# =============================================================================
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # Stub CIB Seven — recebe o callback POST /engine-rest/message do RPA
+  # e exibe o resultado no log / endpoint GET /callbacks
+  # ---------------------------------------------------------------------------
+  stub-cibseven:
+    image: python:3.11-slim
+    container_name: stub_cibseven
+    working_dir: /app
+    command: >
+      sh -c "pip install fastapi uvicorn --quiet &&
+             uvicorn stub_cibseven:app --host 0.0.0.0 --port 9000"
+    volumes:
+      - ./scripts/stub_cibseven.py:/app/stub_cibseven.py:ro
+    ports:
+      - "9000:9000"   # http://localhost:9000/docs
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Sobrescreve a env do rpa para apontar ao stub local
+  # ---------------------------------------------------------------------------
+  rpa:
+    environment:
+      - MAEZO_ENGINE_REST_URL=http://stub-cibseven:9000
+      - DEV=True    # Não submete no portal Unimed — apenas preenche o formulário

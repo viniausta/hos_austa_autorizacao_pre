@@ -34,6 +34,7 @@ try:
         NoAlertPresentException,
         TimeoutException,
         WebDriverException,
+        ElementNotInteractableException,
     )
 
     try:
@@ -111,18 +112,20 @@ else:
             Flags obrigatórias para ambiente containerizado:
               --no-sandbox           → necessário para rodar como root no container
               --disable-dev-shm-usage → evita crash por /dev/shm limitado
-              --headless=new         → sem display físico no container
+            Headless removido: o container Selenium já usa Xvfb como display
+            virtual, permitindo visualização via noVNC em localhost:7900.
             """
             options = Options()
             options.add_argument("--no-sandbox")
             options.add_argument("--disable-dev-shm-usage")
-            options.add_argument("--headless=new")
             options.add_argument("--window-size=1920,1080")
             options.add_argument("--disable-gpu")
             options.add_argument("--disable-popup-blocking")
             options.add_argument("--disable-notifications")
             options.add_experimental_option(
                 "excludeSwitches", ["enable-logging"])
+            # enableVNC: permite visualizar a sessão no Selenoid-UI (ignorado pelo Selenium Grid)
+            options.set_capability("selenoid:options", {"enableVNC": True, "enableVideo": False})
             if caminho_download:
                 options.add_experimental_option("prefs", {
                     "download.default_directory": caminho_download,
@@ -375,7 +378,16 @@ else:
                 if js:
                     self.driver.execute_script("arguments[0].click();", el)
                 else:
-                    el.click()
+                    try:
+                        self.driver.execute_script(
+                            "arguments[0].scrollIntoView({block:'center'});", el)
+                        el.click()
+                    except ElementNotInteractableException:
+                        logger.debug(
+                            "ElementNotInteractable — usando JS click para %s='%s'",
+                            seletor, valor,
+                        )
+                        self.driver.execute_script("arguments[0].click();", el)
                 return True
             except ElementoNaoEncontradoError:
                 return False
@@ -385,8 +397,18 @@ else:
         ) -> None:
             """Limpa o campo e preenche com o texto informado."""
             el = self._encontrar_elemento(seletor, valor, timeout)
-            el.clear()
-            el.send_keys(texto)
+            try:
+                self.driver.execute_script(
+                    "arguments[0].scrollIntoView({block:'center'});", el)
+                el.clear()
+                el.send_keys(texto)
+            except ElementNotInteractableException:
+                logger.debug(
+                    "ElementNotInteractable em definir_valor — usando JS para %s='%s'",
+                    seletor, valor,
+                )
+                self.driver.execute_script(
+                    "arguments[0].value = arguments[1];", el, texto)
 
         def obter_texto(self, seletor: str, valor: str, timeout: int = 10) -> str:
             """Retorna o texto visível do elemento (propriedade .text)."""
@@ -491,7 +513,17 @@ else:
                 "PAGE_DOWN": Keys.PAGE_DOWN,
             }
             el = self._encontrar_elemento(seletor, valor, timeout)
-            el.send_keys(_MAPA.get(tecla.upper(), tecla))
+            key = _MAPA.get(tecla.upper(), tecla)
+            try:
+                self.driver.execute_script(
+                    "arguments[0].scrollIntoView({block:'center'});", el)
+                el.send_keys(key)
+            except ElementNotInteractableException:
+                logger.debug(
+                    "ElementNotInteractable em enviar_tecla — usando ActionChains para %s='%s'",
+                    seletor, valor,
+                )
+                ActionChains(self.driver).send_keys(key).perform()
             logger.debug("Tecla '%s' enviada para %s='%s'",
                          tecla, seletor, valor)
 
