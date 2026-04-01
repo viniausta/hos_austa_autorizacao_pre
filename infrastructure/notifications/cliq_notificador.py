@@ -7,10 +7,12 @@ Comportamento alinhado ao IBM RPA Funcao_EnviarMensagemCliq:
 - Erros são roteados para canal dedicado (canal_erro).
 - Demais notificações vão para o canal normal (canal_normal).
 - Em DEV mode, o envio é suprimido completamente.
+- Implementa backoff exponencial para evitar rate limiting.
 """
 from __future__ import annotations
 
 import logging
+import time
 from datetime import datetime
 from typing import Any, Dict, Optional, Union
 
@@ -105,7 +107,10 @@ class CliqNotificador:
     # ------------------------------------------------------------------
 
     def _refresh_access_token(self) -> bool:
-        """Obtém novo access token usando o refresh token (equivale ao sub RefreshToken do IBM RPA)."""
+        """Obtém novo access token usando o refresh token com backoff exponencial.
+
+        Implementa retry automático com backoff para evitar rate limiting (HTTP 400).
+        """
         url = f"{_ZOHO_ACCOUNTS_URL}/oauth/v2/token"
         data = {
             "refresh_token": self._refresh_token,
@@ -113,23 +118,48 @@ class CliqNotificador:
             "client_secret": self._client_secret,
             "grant_type": "refresh_token",
         }
-        try:
-            response = requests.post(url, data=data, timeout=self._timeout)
-            if response.status_code == 200:
-                token = response.json().get("access_token")
-                if token:
-                    self._access_token = token
-                    logger.debug("Access token Zoho atualizado com sucesso.")
-                    return True
-                logger.error("Resposta OAuth sem access_token: %s", response.text)
-            else:
-                logger.error(
-                    "Erro ao obter access token: HTTP %d — %s",
-                    response.status_code,
-                    response.text,
+        max_retry = 3
+        delay = 1  # Início em 1 segundo
+
+        for tentativa in range(1, max_retry + 1):
+            try:
+                response = requests.post(url, data=data, timeout=self._timeout)
+                if response.status_code == 200:
+                    token = response.json().get("access_token")
+                    if token:
+                        self._access_token = token
+                        logger.debug("Access token Zoho atualizado com sucesso.")
+                        return True
+                    logger.error("Resposta OAuth sem access_token: %s", response.text)
+                elif response.status_code == 400 and tentativa < max_retry:
+                    # Rate limiting — espera e tenta novamente
+                    logger.warning(
+                        "Rate limit Zoho (HTTP 400) — tentativa %d/%d, aguardando %ds...",
+                        tentativa,
+                        max_retry,
+                        delay,
+                    )
+                    time.sleep(delay)
+                    delay = min(delay * 2, 30)  # Exponencial, máximo 30s
+                    continue
+                else:
+                    logger.error(
+                        "Erro ao obter access token: HTTP %d — %s (tentativa %d/%d)",
+                        response.status_code,
+                        response.text[:100],
+                        tentativa,
+                        max_retry,
+                    )
+            except requests.RequestException as e:
+                logger.warning(
+                    "Falha na requisição de refresh token (tentativa %d/%d): %s",
+                    tentativa,
+                    max_retry,
+                    str(e)[:100],
                 )
-        except requests.RequestException as e:
-            logger.exception("Falha na requisição de refresh token: %s", e)
+                if tentativa < max_retry:
+                    time.sleep(delay)
+                    delay = min(delay * 2, 30)
 
         self._access_token = None
         return False

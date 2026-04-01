@@ -134,6 +134,7 @@ def main() -> int:
             id_unidade=config.id_unidade,
             id_projeto=config.id_projeto,
             dev_mode=config.dev_mode,
+            notificador=notificador,
         )
         controle.criar_execucao(
             unidade=config.unidade,
