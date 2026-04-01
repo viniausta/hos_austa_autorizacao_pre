@@ -50,6 +50,11 @@ class OracleClient:
             int(config.db_port or 1521),
             service_name=config.db_service,
         )
+        self._dsn = dsn
+        self._db_user = config.db_user
+        self._db_password = config.db_password
+        self._retry_delay = 2
+        self._max_retry = 5
         self.conn = self._conectar(dsn, config.db_user, config.db_password)
         logger.info(
             "Conectado ao Oracle em %s:%s/%s",
