@@ -83,8 +83,32 @@ def main() -> int:
     caminho_download = config.caminho_padrao / "download"
     caminho_download.mkdir(parents=True, exist_ok=True)
 
+    # -----------------------------------------------------------------
+    # Notificador criado ANTES da infraestrutura — só depende das
+    # credenciais Zoho, garantindo que falhas de DB/browser sejam
+    # notificadas normalmente.
+    # -----------------------------------------------------------------
+    notificador = None
+    if all([
+        config.zoho_client_id,
+        config.zoho_client_secret,
+        config.zoho_refresh_token,
+        config.cliq_canal_normal,
+        config.cliq_canal_erro,
+    ]):
+        notificador = CliqNotificador(
+            client_id=config.zoho_client_id,
+            client_secret=config.zoho_client_secret,
+            refresh_token=config.zoho_refresh_token,
+            canal_normal=config.cliq_canal_normal,
+            canal_erro=config.cliq_canal_erro,
+            dev_mode=config.dev_mode,
+        )
+        logger.info("Notificador Cliq ativo (DEV=%s).", config.dev_mode)
+
     db: Optional[OracleClient] = None
     browser: Optional[WebController] = None
+    controle: Optional[ControleExecucaoService] = None
 
     try:
         # -----------------------------------------------------------------
@@ -101,27 +125,6 @@ def main() -> int:
             remote_url=selenium_remote_url,
             caminho_download=str(caminho_download),
         )
-
-        # -----------------------------------------------------------------
-        # Notificador (opcional — só ativo se credenciais Zoho configuradas)
-        # -----------------------------------------------------------------
-        notificador = None
-        if all([
-            config.zoho_client_id,
-            config.zoho_client_secret,
-            config.zoho_refresh_token,
-            config.cliq_canal_normal,
-            config.cliq_canal_erro,
-        ]):
-            notificador = CliqNotificador(
-                client_id=config.zoho_client_id,
-                client_secret=config.zoho_client_secret,
-                refresh_token=config.zoho_refresh_token,
-                canal_normal=config.cliq_canal_normal,
-                canal_erro=config.cliq_canal_erro,
-                dev_mode=config.dev_mode,
-            )
-            logger.info("Notificador Cliq ativo (DEV=%s).", config.dev_mode)
 
         # -----------------------------------------------------------------
         # Serviço de controle de execução
@@ -161,17 +164,32 @@ def main() -> int:
 
     except RPAException as e:
         logger.error("Erro de domínio na automação: %s", e)
-        if db:
+        if controle:
             try:
-                ControleExecucaoService(db, 0, 0, False).registrar_log(
-                    "ERROR", f"Encerramento por erro: {e}"
-                )
+                controle.registrar_log("ERROR", f"Encerramento por erro de domínio: {e}")
+                controle.finalizar_execucao(status="Erro", observacoes=str(e))
             except Exception:
                 pass
+        if notificador:
+            notificador.notificar_erro(
+                f"[{config.rpa_script_name}] Execução encerrada — erro de domínio",
+                detalhes=str(e),
+            )
         return 1
 
-    except Exception:
+    except Exception as e:
         logger.exception("Erro inesperado — automação encerrada com falha.")
+        if controle:
+            try:
+                controle.registrar_log("ERROR", f"Encerramento por erro inesperado: {e}")
+                controle.finalizar_execucao(status="Erro", observacoes=str(e))
+            except Exception:
+                pass
+        if notificador:
+            notificador.notificar_erro(
+                f"[{config.rpa_script_name}] Execução encerrada — erro inesperado",
+                detalhes=str(e),
+            )
         return 1
 
     finally:
