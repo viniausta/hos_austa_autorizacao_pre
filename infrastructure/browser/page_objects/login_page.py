@@ -53,6 +53,11 @@ class LoginPage:
         logger.info("Navegando para a página de login: %s", url)
         self._browser.navegar(url)
 
+        # TASY exibe alert de resolução ao abrir — descarta automaticamente
+        alerta = self._browser.tratar_alerta(aceitar=True, timeout=5)
+        if alerta:
+            logger.info("Alert descartado após navegação: %s", alerta)
+
         logger.debug(
             "Localizando campo de usuário e preenchendo credenciais...")
         with self._browser.frame_do_elemento(*self._SEL_USUARIO, timeout=10):

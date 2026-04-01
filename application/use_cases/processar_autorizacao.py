@@ -29,8 +29,12 @@ from monitoring.retry import retry
 
 logger = logging.getLogger(__name__)
 
-# Status TASY gravado em ambos os casos de impedimento.
+# Status TASY gravado em casos de impedimento/falha no processamento.
 _NR_STATUS_IMPEDIMENTO = 167
+
+# Status TASY gravado quando a autorização é detectada como duplicata.
+# TODO: substituir pelo código de "Cancelado" quando disponível.
+_NR_STATUS_DUPLICADO = 167
 
 # ---------------------------------------------------------------------------
 # Query de busca — parâmetros dinâmicos evitam SQL injection e hardcodes
@@ -70,8 +74,119 @@ class ProcessarAutorizacaoUseCase:
         self._notificador = notificador
 
     # ------------------------------------------------------------------
-    # Ponto de entrada do caso de uso
+    # Ponto de entrada — modo polling (RPA padrão)
     # ------------------------------------------------------------------
+
+    def inicializar(self) -> None:
+        """Carrega parâmetros e realiza login. Chamado antes de processar_sequencia (modo API)."""
+        url = self._controle.obter_parametro("URL_UNIMED")
+        self.nr_crm = self._controle.obter_parametro("CRM_PRE")
+        self.cod_prestador = self._config.cod_prestador
+        usuario = self._config.usuario_tasy
+        senha = self._config.senha_tasy
+        if not all([url, usuario, senha]):
+            raise ValueError(
+                "Parâmetros URL_UNIMED, USUARIO_TASY ou SENHA_TASY não encontrados."
+            )
+        self._realizar_login(url, usuario, senha)
+
+    def processar_sequencia(self, nr_sequencia: int, cd_estabelecimento: int) -> Optional[dict]:
+        """Modo API/webhook: processa uma única autorização identificada pelo nr_sequencia.
+
+        Requer chamada prévia a inicializar() para que login e parâmetros estejam prontos.
+
+        Returns:
+            Dicionário com status_retorno_tasy, mensagem, cod_guia, cod_requisicao.
+            None se a autorização não for encontrada ou for descartada como duplicata.
+        """
+        rows = self._db.execute_query(
+            """SELECT * FROM tasy.BPM_AUTORIZACOES_V
+               WHERE nr_sequencia       = :1
+                 AND cd_estabelecimento = :2
+                 AND ds_estagio         = 'CM-Necessidade de Autorização - WS'
+                 AND ie_tipo_autorizacao IN (1, 6)
+                 AND cd_convenio        IN (27)""",
+            (nr_sequencia, cd_estabelecimento),
+        )
+        if not rows:
+            raise ValueError(
+                f"NrSequencia {nr_sequencia} não encontrada ou não está em "
+                "'CM-Necessidade de Autorização - WS' para processamento."
+            )
+
+        autorizacao = Autorizacao.from_row(
+            rows[0],
+            nr_crm=getattr(self, "nr_crm", None),
+            cod_prestador=getattr(self, "cod_prestador", str(self._config.cod_prestador)),
+        )
+
+        logger.info(
+            "API: processando NrAtend=%s | Seq=%s | Tipo=%s",
+            autorizacao.nr_atendimento,
+            autorizacao.nr_sequencia,
+            autorizacao.tipo_autorizacao,
+        )
+
+        if not self._verificar_e_inserir_autorizacao(autorizacao):
+            return None
+
+        try:
+            resultado = self._autorizacao.processar(autorizacao)
+            if resultado:
+                self._atualizar_resultado_banco(autorizacao, resultado)
+                if self._notificador:
+                    self._notificador.notificar_sucesso(
+                        f"[{self._config.rpa_script_name}] "
+                        f"#NrAtend: {autorizacao.nr_atendimento} > "
+                        f"{resultado.get('status_portal', '')} - {resultado.get('mensagem', '')}"
+                    )
+            return resultado
+        except Exception as e:
+            logger.error("Falha ao processar NrAtend=%s: %s", autorizacao.nr_atendimento, e)
+            self._atualizar_falha_banco(autorizacao, str(e))
+            raise
+
+    def processar_com_dados(self, autorizacao: Autorizacao) -> Optional[dict]:
+        """Modo API/FHIR: processa com dados recebidos diretamente via payload.
+
+        Diferente de processar_sequencia(), não consulta Oracle para obter os dados
+        de entrada — recebe a entidade Autorizacao já construída pelo endpoint.
+        Oracle ainda é usado para deduplicação e para gravar o resultado.
+
+        Requer chamada prévia a inicializar() para login e URL do portal.
+
+        Args:
+            autorizacao: Entidade construída via Autorizacao.from_fhir_payload().
+
+        Returns:
+            Dicionário com status_retorno_tasy, mensagem, cod_guia, cod_requisicao.
+            None se descartado como duplicata.
+        """
+        logger.info(
+            "API/FHIR: processando NrAtend=%s | Seq=%s | Convenio=%s",
+            autorizacao.nr_atendimento,
+            autorizacao.nr_sequencia,
+            autorizacao.ds_convenio,
+        )
+
+        if not self._verificar_e_inserir_autorizacao(autorizacao):
+            return None
+
+        try:
+            resultado = self._autorizacao.processar(autorizacao)
+            if resultado:
+                self._atualizar_resultado_banco(autorizacao, resultado)
+                if self._notificador:
+                    self._notificador.notificar_sucesso(
+                        f"[{self._config.rpa_script_name}] "
+                        f"#NrAtend: {autorizacao.nr_atendimento} > "
+                        f"{resultado.get('status_portal', '')} - {resultado.get('mensagem', '')}"
+                    )
+            return resultado
+        except Exception as e:
+            logger.error("Falha ao processar NrAtend=%s: %s", autorizacao.nr_atendimento, e)
+            self._atualizar_falha_banco(autorizacao, str(e))
+            raise
 
     def executar(self) -> None:
         """Executa o loop principal de processamento de autorizações."""
@@ -153,6 +268,88 @@ class ProcessarAutorizacaoUseCase:
         if not continuar:
             logger.info("CONTINUAR_EXECUCAO=%s — encerrando loop.", raw)
         return continuar
+
+    def _verificar_e_inserir_autorizacao(self, autorizacao: Autorizacao) -> bool:
+        """Verifica duplicidade e registra a autorização na base de controle RPA.
+
+        Se o mesmo nr_atendimento já foi processado nos últimos 5 minutos
+        (STATUS='PENDENTE' ou DT_EXECUCAO recente) → cancela esta autorização.
+        Caso contrário → INSERT STATUS='PENDENTE' e retorna True para processar.
+        """
+        try:
+            atendimento_recente = self._db.execute_scalar(
+                """SELECT COUNT(*)
+                   FROM ROBO_RPA.HOS_AUTORIZACOES
+                   WHERE NR_ATENDIMENTO     = :1
+                     AND CD_ESTABELECIMENTO = :2
+                     AND (
+                         STATUS     = 'PENDENTE'
+                         OR DT_EXECUCAO >= SYSDATE - INTERVAL '5' MINUTE
+                     )""",
+                (autorizacao.nr_atendimento, autorizacao.cd_estabelecimento),
+            ) or 0
+        except Exception as e:
+            logger.warning(
+                "Erro ao verificar duplicidade NrAtend=%s — continuando: %s",
+                autorizacao.nr_atendimento, e,
+            )
+            return True
+
+        if atendimento_recente:
+            logger.warning(
+                "Duplicata detectada — NrAtend=%s | Seq=%s — cancelando.",
+                autorizacao.nr_atendimento, autorizacao.nr_sequencia,
+            )
+            self._controle.registrar_log(
+                "WARN", "Autorização Cancelada - Duplicada", str(autorizacao.nr_atendimento)
+            )
+            try:
+                self._db.call_procedure(
+                    "TASY.ATUALIZAR_AUTORIZACAO_CONVENIO",
+                    {
+                        "NR_SEQUENCIA_P":        autorizacao.nr_sequencia,
+                        "NM_USUARIO_P":          "automacaotasy",
+                        "NR_SEQ_ESTAGIO_P":      _NR_STATUS_DUPLICADO,
+                        "IE_CONTA_PARTICULAR_P": "N",
+                        "IE_CONTA_CONVENIO_P":   "N",
+                        "IE_COMMIT_P":           "S",
+                    },
+                )
+            except Exception as e:
+                logger.error("Erro ao cancelar duplicata NrSeq=%s: %s", autorizacao.nr_sequencia, e)
+            if self._notificador:
+                self._notificador.notificar_alerta(
+                    f"[{self._config.rpa_script_name}] "
+                    f"#NrAtend: {autorizacao.nr_atendimento}/{autorizacao.nr_sequencia} > "
+                    f"Duplicata cancelada"
+                )
+            return False
+
+        self._executar_sql(
+            """INSERT INTO ROBO_RPA.HOS_AUTORIZACOES (
+                   CONTROLE_EXECUCAO, NR_ATENDIMENTO, NR_SEQUENCIA,
+                   DT_AUTORIZACAO, TIPO_AUTORIZACAO, SETOR_ORIGEM,
+                   CD_CONVENIO, DS_CONVENIO, COD_CARTERINHA,
+                   DT_ENTRADA, STATUS, CD_ESTABELECIMENTO
+               ) VALUES (
+                   :1, :2, :3, :4, :5, '**',
+                   :6, :7, :8, :9, 'PENDENTE', :10
+               )""",
+            (
+                self._controle.id_execucao,
+                autorizacao.nr_atendimento,
+                autorizacao.nr_sequencia,
+                autorizacao.dt_autorizacao,
+                autorizacao.tipo_autorizacao,
+                autorizacao.cd_convenio,
+                autorizacao.ds_convenio or "",
+                autorizacao.cod_carterinha or "",
+                autorizacao.dt_entrada,
+                autorizacao.cd_estabelecimento,
+            ),
+            "INSERT HOS_AUTORIZACOES PENDENTE",
+        )
+        return True
 
     def _buscar_autorizacoes_pendentes(self) -> List[Autorizacao]:
         """Consulta autorizações pendentes no banco de dados."""
@@ -448,8 +645,61 @@ class ProcessarAutorizacaoUseCase:
             "UPDATE HOS_AUTORIZACOES IMPEDIMENTO",
         )
 
+    def _copiar_pdf_smb(self, arquivo_local: Path, nome_destino: str, nr_atend: str = "") -> bool:
+        """Envia o PDF diretamente para o share SMB do Tasy via SMB2/3 (smbclient).
+
+        Usado quando o container Linux não consegue montar o UNC path via Docker.
+        Retorna True em sucesso, False em falha (sem lançar exceção).
+        """
+        try:
+            import smbclient as smb  # type: ignore
+        except ImportError:
+            logger.error("smbclient não instalado — impossível usar SMB direto")
+            return False
+
+        server = self._config.tasy_smb_server
+        share = self._config.tasy_smb_share
+        if not server or not share:
+            return False
+
+        # caminho_rede_anexo = "intensicare\robo.rpa" → domain\user
+        rede = self._config.caminho_rede_anexo
+        partes = rede.split("\\", 1)
+        username = f"{partes[0]}\\{partes[1]}" if len(partes) == 2 else rede
+
+        # Pasta dentro do share: nome final de caminho_tasy_storage
+        # ex: "/mnt/tasy-storage/anexo_opme" → "anexo_opme"
+        pasta_share = Path(self._config.caminho_tasy_storage).name
+        caminho_remoto = f"\\\\{server}\\{share}\\{pasta_share}\\{nome_destino}"
+
+        try:
+            smb.register_session(
+                server,
+                username=username,
+                password=self._config.senha_rede_anexo,
+            )
+            dados = arquivo_local.read_bytes()
+            with smb.open_file(caminho_remoto, mode="wb") as f:
+                f.write(dados)
+
+            logger.info(
+                "PDF enviado via SMB: %s (%d bytes) | NrAtend=%s",
+                caminho_remoto, len(dados), nr_atend,
+            )
+            return True
+        except Exception as e:
+            logger.error("Erro SMB ao enviar %s: %s | NrAtend=%s", nome_destino, e, nr_atend)
+            return False
+
     def _anexar_guia_tasy(self, autorizacao: Autorizacao, pdfs: list) -> None:
         """Renomeia o PDF, copia para o storage do Tasy e insere registro na tabela."""
+        if not self._config.caminho_tasy_storage:
+            logger.warning(
+                "CAMINHO_TASY_STORAGE não configurado — anexo ao Tasy ignorado | NrAtend=%s",
+                autorizacao.nr_atendimento,
+            )
+            return
+
         nr_atend = autorizacao.nr_atendimento
         nr_seq = autorizacao.nr_sequencia
         tasy_storage = Path(self._config.caminho_tasy_storage)
@@ -477,12 +727,28 @@ class ProcessarAutorizacaoUseCase:
 
             try:
                 pdf_path.rename(novo_caminho)
-                shutil.copy2(str(novo_caminho), str(tasy_storage))
-                logger.info("PDF copiado para Tasy storage: %s | NrAtend=%s",
-                            nome_arquivo, nr_atend)
             except Exception as e:
-                logger.warning("Erro ao copiar PDF para Tasy storage: %s", e)
+                logger.warning("Erro ao renomear PDF: %s | NrAtend=%s", e, nr_atend)
                 continue
+
+            # Tenta SMB direto (container Linux → share de rede do Tasy)
+            copiado = False
+            if self._config.tasy_smb_server and self._config.tasy_smb_share:
+                copiado = self._copiar_pdf_smb(novo_caminho, nome_arquivo, str(nr_atend))
+                if not copiado:
+                    logger.warning(
+                        "SMB falhou — tentando shutil como fallback | NrAtend=%s", nr_atend)
+
+            if not copiado:
+                try:
+                    shutil.copy2(str(novo_caminho), str(tasy_storage))
+                    logger.info("PDF copiado para Tasy storage (shutil): %s | NrAtend=%s",
+                                nome_arquivo, nr_atend)
+                    copiado = True
+                except Exception as e:
+                    logger.warning("Erro ao copiar PDF para Tasy storage: %s | NrAtend=%s",
+                                   e, nr_atend)
+                    continue
 
             ds_arquivo = (
                 "tasy-storage://INSURANCE_AUTHORIZATION"
@@ -504,6 +770,13 @@ class ProcessarAutorizacaoUseCase:
             )
             self._controle.registrar_log("INFO", "Inseriu Anexo no Tasy",
                                          str(nr_atend))
+
+            # Limpeza: remove PDF local do container (o arquivo no share de rede permanece)
+            try:
+                novo_caminho.unlink(missing_ok=True)
+                logger.debug("PDF local removido: %s | NrAtend=%s", novo_caminho, nr_atend)
+            except Exception as e:
+                logger.debug("Falha ao remover PDF local: %s | NrAtend=%s", e, nr_atend)
 
     def _atualizar_categoria_unimed(
         self, autorizacao: Autorizacao, cod_guia: str
