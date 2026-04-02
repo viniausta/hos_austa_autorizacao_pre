@@ -74,6 +74,8 @@ services:
     command: ["--selenoid-uri", "http://selenoid:4444"]
     environment:
       - TZ=America/Sao_Paulo
+    volumes:
+      - /usr/share/zoneinfo:/usr/share/zoneinfo:ro
     depends_on:
       - selenoid
     restart: unless-stopped
@@ -95,6 +97,7 @@ services:
     env_file:
       - .env
     environment:
+      - TZ=America/Sao_Paulo
       - SELENIUM_REMOTE_URL=http://selenoid:4444/wd/hub
       - ORACLE_INSTANT_CLIENT_DIR=/opt/oracle/instantclient_21_11
     ports:
