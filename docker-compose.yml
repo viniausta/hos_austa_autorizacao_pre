@@ -43,6 +43,7 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock   # Selenoid cria containers via Docker
       - ./selenoid:/etc/selenoid:ro                  # browsers.json
       - selenoid_logs:/opt/selenoid/logs
+      - /etc/localtime:/etc/localtime:ro             # Timezone do host
     command: >
       -conf /etc/selenoid/browsers.json
       -log-output-dir /opt/selenoid/logs
@@ -69,6 +70,8 @@ services:
     ports:
       - "8080:8080"   # Dashboard → http://localhost:8080
     command: ["--selenoid-uri", "http://selenoid:4444"]
+    environment:
+      - TZ=America/Sao_Paulo
     depends_on:
       - selenoid
     restart: unless-stopped
