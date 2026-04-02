@@ -45,6 +45,7 @@ services:
       - selenoid_logs:/opt/selenoid/logs
       - /etc/localtime:/etc/localtime:ro             # Timezone do host
       - /etc/timezone:/etc/timezone:ro               # Timezone name (Go apps)
+      - /usr/share/zoneinfo:/usr/share/zoneinfo:ro   # Timezone data (Go runtime)
     command: >
       -conf /etc/selenoid/browsers.json
       -log-output-dir /opt/selenoid/logs
