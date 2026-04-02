@@ -44,6 +44,7 @@ services:
       - ./selenoid:/etc/selenoid:ro                  # browsers.json
       - selenoid_logs:/opt/selenoid/logs
       - /etc/localtime:/etc/localtime:ro             # Timezone do host
+      - /etc/timezone:/etc/timezone:ro               # Timezone name (Go apps)
     command: >
       -conf /etc/selenoid/browsers.json
       -log-output-dir /opt/selenoid/logs
@@ -68,7 +69,7 @@ services:
     image: aerokube/selenoid-ui:latest
     container_name: austa_selenoid_ui
     ports:
-      - "8080:8080"   # Dashboard → http://localhost:8080
+      - "8888:8080"   # Dashboard → http://localhost:8080
     command: ["--selenoid-uri", "http://selenoid:4444"]
     environment:
       - TZ=America/Sao_Paulo
@@ -101,6 +102,8 @@ services:
       selenoid:
         condition: service_healthy
     restart: on-failure
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./logs:/app/logs
       - evidencias:/app/Evidencia
